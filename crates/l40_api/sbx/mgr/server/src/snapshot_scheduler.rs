@@ -878,7 +878,8 @@ pub async fn do_checkpoint(
             ));
         }
 
-        let previous_state = sandbox.state;
+        // The check above admits only an unowned started or paused row.
+        let previous_state = sandbox.state.lifecycle;
 
         // Transition to Checkpointing while still holding the lock
         begin_checkpoint_state(&db, sandbox_id)?;

@@ -255,7 +255,7 @@ pub(super) fn insert_created_row(
             guest_image: Default::default(),
             id,
             uuid8: &SandboxRuntimeLabel::from_sandbox_id(sandbox_id),
-            state,
+            state: state.into(),
             template: TEMPLATE,
             template_hash: Some(template_hash),
             user: owner,
@@ -551,14 +551,16 @@ async fn pool_create_never_adopts_a_donor_of_another_build() {
 
 /// What a requested-id create does with a compatible existing row in
 /// `state`, written out per state.
-fn requested_create_outcome(state: SandboxState) -> Result<(), (tonic::Code, String)> {
+fn requested_create_outcome(state: SandboxStatus) -> Result<(), (tonic::Code, String)> {
     use SandboxState::*;
-    match state {
-        Created | Started | Paused | Suspended | Stopped => Ok(()),
-        CleanupRequired | CleanupFailed => Err((
+    if state.is_cleanup_owned() {
+        return Err((
             tonic::Code::Unavailable,
             "is still completing activation cleanup; retry".to_owned(),
-        )),
+        ));
+    }
+    match state.lifecycle {
+        Created | Started | Paused | Suspended | Stopped => Ok(()),
         Creating | Starting | Stopping | Deleting | Pausing | Resuming | Checkpointing
         | Suspending | Restoring | Quarantined | Failed => Err((
             tonic::Code::AlreadyExists,
@@ -574,7 +576,7 @@ async fn requested_id_create_reuses_only_a_compatible_settled_row() {
     }
     struct Case {
         name: String,
-        state: SandboxState,
+        state: SandboxStatus,
         template_hash: &'static str,
         request_policy: AutoLifecyclePolicy,
         outcome: Result<(), (tonic::Code, String)>,
@@ -583,6 +585,11 @@ async fn requested_id_create_reuses_only_a_compatible_settled_row() {
     // reuse must update the policy and a refusal must leave it.
     let mut cases: Vec<Case> = SandboxState::all()
         .into_iter()
+        .map(SandboxStatus::from)
+        .chain([
+            SandboxStatus::CLEANUP_REQUIRED,
+            SandboxStatus::CLEANUP_FAILED,
+        ])
         .map(|state| Case {
             name: format!("compatible {state} row"),
             state,
@@ -593,7 +600,7 @@ async fn requested_id_create_reuses_only_a_compatible_settled_row() {
         .collect();
     cases.push(Case {
         name: "compatible started row with the same policy".into(),
-        state: SandboxState::Started,
+        state: SandboxState::Started.into(),
         template_hash: BUILD,
         request_policy: AutoLifecyclePolicy::disabled(),
         outcome: Ok(()),
@@ -606,7 +613,7 @@ async fn requested_id_create_reuses_only_a_compatible_settled_row() {
     ] {
         cases.push(Case {
             name: format!("started row of another build with {policy}"),
-            state: SandboxState::Started,
+            state: SandboxState::Started.into(),
             template_hash: "sha256:previous-build",
             request_policy,
             outcome: Err((

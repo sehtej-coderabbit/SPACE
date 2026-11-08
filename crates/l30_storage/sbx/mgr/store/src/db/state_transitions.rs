@@ -574,8 +574,8 @@ pub fn complete_resident_wake_operation(
     let generation = route
         .execution_generation
         .ok_or(ActivationOperationError::RouteMismatch)?;
-    let target =
-        activation_completed_target(target).ok_or(ActivationOperationError::InvalidTarget)?;
+    let target = activation_completed_target(target.into())
+        .ok_or(ActivationOperationError::InvalidTarget)?;
     let previous: (Option<i64>, Option<String>, Option<String>, Option<String>) = tx.query_row(
         "SELECT transition_receipt_execution_generation, transition_receipt_activation_attempt_id,
                 transition_receipt_kind, transition_receipt_target_state
@@ -625,8 +625,8 @@ pub fn complete_resident_wake_operation(
     tx.commit().map_err(Into::into)
 }
 
-fn activation_completed_target(state: SandboxState) -> Option<SandboxTransitionTargetState> {
-    match state {
+fn activation_completed_target(state: SandboxStatus) -> Option<SandboxTransitionTargetState> {
+    match state.unowned()? {
         SandboxState::Created => Some(SandboxTransitionTargetState::Created),
         SandboxState::Started => Some(SandboxTransitionTargetState::Started),
         SandboxState::Paused => Some(SandboxTransitionTargetState::Paused),
@@ -642,8 +642,9 @@ fn persist_activation_completed_receipt(
     tx: &Transaction<'_>,
     sandbox_id: &str,
     cleanup_id: SandboxCleanupEpisodeId,
-    target_state: SandboxState,
+    target_state: impl Into<SandboxStatus>,
 ) -> Result<()> {
+    let target_state = target_state.into();
     let Some(episode) = cleanup_episode(tx, sandbox_id)?.filter(|episode| episode.id == cleanup_id)
     else {
         return Ok(());
@@ -795,9 +796,8 @@ pub fn complete_create(
     )?;
     if changed == 1 {
         if publish_activation_completion {
-            let target_state = get_sandbox(&tx, id)?
-                .map(|row| row.state)
-                .unwrap_or(SandboxState::Created);
+            let target_state =
+                get_sandbox(&tx, id)?.map_or(SandboxState::Created.into(), |row| row.state);
             persist_activation_completed_receipt(&tx, id, cleanup_id, target_state)?;
         }
         tx.execute(
@@ -867,7 +867,7 @@ pub fn mark_restore_succeeded(
         emit_sandbox_state_event(
             id,
             SandboxEventType::RestoreCompleted,
-            Some(SandboxState::Restoring.as_str()),
+            Some(SandboxState::Restoring.into()),
             "restore_succeeded",
             "mark_restore_succeeded",
             final_state,

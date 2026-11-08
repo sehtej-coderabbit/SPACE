@@ -163,8 +163,10 @@ impl RuntimeUpgradeEffects for Arc<Fake> {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(row.state, SandboxState::Stopped | SandboxState::Suspended)
-                && row.cleanup_completion.is_none(),
+            matches!(
+                row.state.unowned(),
+                Some(SandboxState::Stopped | SandboxState::Suspended)
+            ) && row.cleanup_completion.is_none(),
             "restore ran while the sandbox was {}",
             row.state
         );
@@ -229,7 +231,7 @@ impl RuntimeUpgradeEffects for Arc<Fake> {
                         crate::db::test_fixtures::begin_activation(
                             &db,
                             &sandbox_id,
-                            row.state,
+                            row.state.lifecycle,
                             kind,
                             None,
                             None,
@@ -244,7 +246,7 @@ impl RuntimeUpgradeEffects for Arc<Fake> {
             let episode = crate::db::begin_activation_with_route_evidence(
                 &db,
                 &sandbox_id,
-                row.state,
+                row.state.lifecycle,
                 ActivationKind::ColdStart,
                 None,
                 None,
@@ -255,7 +257,7 @@ impl RuntimeUpgradeEffects for Arc<Fake> {
             )
             .map_err(|error| begin_activation_status(error, "claim"))?
             .expect("the upgrade's own boot claims the sandbox");
-            (row.state, episode.id)
+            (row.state.lifecycle, episode.id)
         };
         *self.instance.lock().unwrap() = "disk written by the new boot".into();
         match boot {

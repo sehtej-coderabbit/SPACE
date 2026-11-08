@@ -421,13 +421,13 @@ impl SandboxManagerService {
                 self.watchdog.record_lifecycle_edge(&sandbox.id).await;
                 // Report the state the row was left in. A missing row is never
                 // a rejection here: its rollback reads as `started`.
-                let pause_state = match pause_result {
-                    Ok(state) => state,
+                let pause_state: SandboxStatus = match pause_result {
+                    Ok(state) => state.into(),
                     Err(
                         StateWriteRejected::FromState { found }
                         | StateWriteRejected::Guard { found, .. },
                     ) => found,
-                    Err(StateWriteRejected::Missing) => SandboxState::Started,
+                    Err(StateWriteRejected::Missing) => SandboxState::Started.into(),
                 };
                 let reason = format!("auto-pause failed; sandbox reconciled to {pause_state}");
                 crate::metrics::snapshot::create_failed(

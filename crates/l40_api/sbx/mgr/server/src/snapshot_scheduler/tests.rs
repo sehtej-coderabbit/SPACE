@@ -4,6 +4,7 @@ use super::retention::{
 use pplx_space_common_core::types::SandboxId;
 
 use super::*;
+use crate::state::SandboxStatus;
 
 #[tokio::test]
 async fn checkpoint_retries_preserve_disk_cadence_and_replacement_registration() {
@@ -134,7 +135,7 @@ fn snapshot_names_use_utc_calendar_time() {
     }
 }
 
-fn checkpoint_context(state: SandboxState) -> (CheckpointContext, String) {
+fn checkpoint_context(state: impl Into<SandboxStatus>) -> (CheckpointContext, String) {
     let conn = crate::db::test_conn();
     let sandbox_id = SandboxId::new().to_string();
     let (lifecycle, cleanup_state) =
@@ -162,31 +163,30 @@ fn checkpoint_context(state: SandboxState) -> (CheckpointContext, String) {
 /// Every other row keeps every table unchanged and reports why.
 #[test]
 fn checkpoint_admission_writes_only_over_a_started_or_paused_row() {
-    for state in SandboxState::all() {
-        let expected_error = match state {
-            SandboxState::Started | SandboxState::Paused => None,
+    for state in SandboxStatus::sweep() {
+        let expected_error = match state.unowned() {
+            Some(SandboxState::Started | SandboxState::Paused) => None,
             // The generic guards: a stopping or cleanup row is never revived,
             // and a deleting row owns its `delete_row` cleanup.
-            SandboxState::Stopping
-            | SandboxState::Deleting
-            | SandboxState::CleanupRequired
-            | SandboxState::CleanupFailed => Some(
+            Some(SandboxState::Stopping | SandboxState::Deleting) | None => Some(
                 "sandbox state write was not applied: superseded_by_cleanup_episode".to_string(),
             ),
-            SandboxState::Quarantined => {
+            Some(SandboxState::Quarantined) => {
                 Some("sandbox state write was not applied: blocked_by_quarantine".to_string())
             }
-            SandboxState::Creating
-            | SandboxState::Created
-            | SandboxState::Starting
-            | SandboxState::Stopped
-            | SandboxState::Pausing
-            | SandboxState::Resuming
-            | SandboxState::Checkpointing
-            | SandboxState::Suspending
-            | SandboxState::Suspended
-            | SandboxState::Restoring
-            | SandboxState::Failed => Some(format!(
+            Some(
+                SandboxState::Creating
+                | SandboxState::Created
+                | SandboxState::Starting
+                | SandboxState::Stopped
+                | SandboxState::Pausing
+                | SandboxState::Resuming
+                | SandboxState::Checkpointing
+                | SandboxState::Suspending
+                | SandboxState::Suspended
+                | SandboxState::Restoring
+                | SandboxState::Failed,
+            ) => Some(format!(
                 "sandbox state write was superseded: sandbox is {state}"
             )),
         };

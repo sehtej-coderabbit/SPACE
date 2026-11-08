@@ -14,7 +14,7 @@ use crate::service::SandboxManagerService;
 use crate::service::activation_support::internal_request;
 use crate::service::network_policy::EffectiveNetworkPolicy;
 use crate::service::tests::service_tests::insert_test_sandbox;
-use crate::state::SandboxState;
+use crate::state::{SandboxState, SandboxStatus};
 use pplx_space_common_core::node_drain_signals::{
     REUPLOAD_ARTIFACT_MISSING_MARKER, REUPLOAD_SANDBOX_UNKNOWN_MARKER,
 };
@@ -1194,7 +1194,7 @@ async fn kill_refuses_signals_it_cannot_deliver_before_cleanup_admission() {
                     "{case}: {error}"
                 );
             }
-            cleanup_untouched(&service, &id, Some(state), &case);
+            cleanup_untouched(&service, &id, Some(state.into()), &case);
         }
     }
 
@@ -1249,7 +1249,7 @@ async fn kill_refuses_signals_it_cannot_deliver_before_cleanup_admission() {
         }
         let error = kill(&service, &id, signal, case, barrier).await;
         assert_eq!(error.code(), expected, "{case}: {error}");
-        cleanup_untouched(&service, &id, state, case);
+        cleanup_untouched(&service, &id, state.map(SandboxStatus::from), case);
     }
 }
 

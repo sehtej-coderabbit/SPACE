@@ -39,7 +39,7 @@ fn insert_test_sandbox(conn: &crate::db::Connection, id: &str, state: crate::sta
             guest_image: Default::default(),
             id,
             uuid8: &uuid8,
-            state,
+            state: state.into(),
             template: "seed",
             template_hash: Some("hash"),
             user: &user,
@@ -842,7 +842,7 @@ fn gateway_inventory_counts_every_live_process_with_explicit_unknowns() {
             NetGatewayTlsInterceptionMode::On,
             "gateway-a",
             "sha256:template-a",
-            NetGatewayLifecycle::Known(crate::state::SandboxState::Started),
+            NetGatewayLifecycle::Known(crate::state::SandboxState::Started.into()),
         ),
         Some(1)
     );
@@ -851,7 +851,7 @@ fn gateway_inventory_counts_every_live_process_with_explicit_unknowns() {
             NetGatewayTlsInterceptionMode::Off,
             "unknown",
             "unknown",
-            NetGatewayLifecycle::Known(crate::state::SandboxState::Paused),
+            NetGatewayLifecycle::Known(crate::state::SandboxState::Paused.into()),
         ),
         Some(2)
     );
@@ -866,10 +866,10 @@ fn gateway_inventory_counts_every_live_process_with_explicit_unknowns() {
     );
 }
 
-fn health_row(id: &str, state: crate::state::SandboxState) -> SandboxGuestHealthRow {
+fn health_row(id: &str, state: impl Into<crate::state::SandboxStatus>) -> SandboxGuestHealthRow {
     SandboxGuestHealthRow {
         id: id.to_string(),
-        state,
+        state: state.into(),
         template_content_hash: Some("hash".to_string()),
     }
 }

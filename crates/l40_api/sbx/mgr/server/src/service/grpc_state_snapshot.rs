@@ -35,7 +35,7 @@ fn state_publication_metric_field(
 }
 
 fn state_publication_metadata_disposition(
-    state: SandboxState,
+    state: SandboxStatus,
 ) -> pplx_space_sandbox_metrics::publication::StatePublicationDisposition {
     use pplx_space_sandbox_metrics::publication::StatePublicationDisposition;
 
@@ -456,15 +456,18 @@ fn live_sandbox_namespace(
 }
 
 fn sandbox_status_from_runtime_observation(
-    state: SandboxState,
+    state: SandboxStatus,
     pid_alive: bool,
     vm_state: Option<VmState>,
-) -> SandboxState {
+) -> SandboxStatus {
     if pid_alive
-        && matches!(state, SandboxState::Started | SandboxState::Paused)
+        && matches!(
+            state.unowned(),
+            Some(SandboxState::Started | SandboxState::Paused)
+        )
         && vm_state == Some(VmState::Paused)
     {
-        SandboxState::Paused
+        SandboxState::Paused.into()
     } else {
         state
     }
@@ -679,28 +682,22 @@ impl SandboxManagerService {
                                 }
                                 None => crate::db::ActivationRouteProvenance::default(),
                             };
-                            // A cleanup-owned row publishes its stored
-                            // lifecycle label.
-                            let published_label = if lifecycle
-                                .state
-                                .parse::<SandboxState>()
-                                .is_ok_and(|status| {
-                                    cleanup_owner(status)
-                                        != crate::proto::SandboxCleanupState::Unspecified
-                                }) {
-                                &lifecycle.lifecycle
-                            } else {
-                                &lifecycle.state
-                            };
+                            // A status this binary can't decode publishes an
+                            // unspecified lifecycle and only the recorded
+                            // completion; the degraded flag marks it unknown.
+                            let status = SandboxStatus::from_columns(
+                                &lifecycle.lifecycle,
+                                lifecycle.cleanup_state.as_deref(),
+                            );
                             let mut sandbox = SandboxInfo {
-                                lifecycle: Some(crate::proto::SandboxLifecycleState::from_label(published_label).unwrap_or(crate::proto::SandboxLifecycleState::Unspecified) as i32),
+                                lifecycle: Some(status.map_or(
+                                    crate::proto::SandboxLifecycleState::Unspecified,
+                                    |status| status.lifecycle.into(),
+                                ) as i32),
                                 sandbox_id,
                                 state_changed_at: sqlite_timestamp(&lifecycle.state_changed_at),
-                                // An undecodable status publishes only the
-                                // recorded completion; the unspecified,
-                                // degraded lifecycle already marks it unknown.
                                 cleanup: cleanup_observation(
-                                    lifecycle.state.parse::<SandboxState>().map_or(
+                                    status.map_or(
                                         crate::proto::SandboxCleanupState::Unspecified,
                                         cleanup_owner,
                                     ),
@@ -734,7 +731,7 @@ impl SandboxManagerService {
         let mut route_identity_provenance = route_identity_provenance;
         let sandbox_results = stream::iter(rows.into_iter().map(|sandbox| {
             let sandbox_id = sandbox.id.clone();
-            let status = (sandbox.state, sandbox.lifecycle, sandbox.cleanup_completion);
+            let status = (sandbox.state, sandbox.cleanup_completion);
             let metadata = publication_metadata.remove(&sandbox.id);
             let state_changed_at = state_changed_at.remove(&sandbox.id);
             let pinned_artifact_created_at = pinned_artifact_created_at.remove(&sandbox.id);
@@ -817,13 +814,12 @@ impl SandboxManagerService {
                     );
                     tracing::warn!(%sandbox_id, %error, %disposition, "publishing lifecycle without unpublishable sandbox fields");
                     // The row was read; only fields published from it failed,
-                    // so its status, stored lifecycle and recorded completion
-                    // are still known.
-                    let (status, lifecycle, completion) = status;
+                    // so its status and recorded completion are still known.
+                    let (status, completion) = status;
                     let mut sandbox = SandboxInfo {
-                        lifecycle: Some(crate::proto::SandboxLifecycleState::from(
-                            published_lifecycle(status, lifecycle),
-                        ) as i32),
+                        lifecycle: Some(
+                            crate::proto::SandboxLifecycleState::from(status.lifecycle) as i32,
+                        ),
                         cleanup: cleanup_observation(cleanup_owner(status), completion),
                         sandbox_id,
                         state_degraded: true,
@@ -1069,10 +1065,7 @@ impl SandboxManagerService {
             sandbox_id: sandbox.id.clone(),
             template: Some(sandbox.template.clone()),
             lifecycle: Some(
-                crate::proto::SandboxLifecycleState::from(published_lifecycle(
-                    observed_state,
-                    sandbox.lifecycle,
-                )) as i32,
+                crate::proto::SandboxLifecycleState::from(observed_state.lifecycle) as i32,
             ),
             pid,
             namespace: live_sandbox_namespace(pid_alive, &sandbox.uuid8),
@@ -1525,12 +1518,16 @@ impl SandboxManagerService {
                     sandbox.state
                 )));
             }
-            OperationSnapshotPlan::from_state(sandbox.state).ok_or_else(|| {
-                Status::failed_precondition(format!(
-                    "source lifecycle {} does not support operation snapshots",
-                    sandbox.state
-                ))
-            })
+            sandbox
+                .state
+                .unowned()
+                .and_then(OperationSnapshotPlan::from_state)
+                .ok_or_else(|| {
+                    Status::failed_precondition(format!(
+                        "source lifecycle {} does not support operation snapshots",
+                        sandbox.state
+                    ))
+                })
         };
         let plan = validate_source()?;
 
@@ -1913,7 +1910,7 @@ impl SandboxManagerService {
             if sandbox.state != SandboxState::Paused {
                 return Err(Status::failed_precondition(format!(
                     "template base snapshot requires paused sandbox, got {}",
-                    sandbox.state.as_str()
+                    sandbox.state
                 )));
             }
             self.ensure_memory_state_supported(&sandbox, "create template base snapshot")?;
@@ -2126,23 +2123,12 @@ pub(super) fn cleanup_observation(
     })
 }
 
-/// The lifecycle published for a row read as `status` whose stored lifecycle
-/// is `lifecycle`: a cleanup-owned row publishes the lifecycle its cleanup is
-/// over, and `cleanup.state` names the cleanup.
-pub(super) fn published_lifecycle(status: SandboxState, lifecycle: SandboxState) -> SandboxState {
-    if cleanup_owner(status) != crate::proto::SandboxCleanupState::Unspecified {
-        lifecycle
-    } else {
-        status
-    }
-}
-
-/// Whether a cleanup owns a row with this combined status.
-pub(super) fn cleanup_owner(status: SandboxState) -> crate::proto::SandboxCleanupState {
-    match status {
-        SandboxState::CleanupRequired => crate::proto::SandboxCleanupState::Required,
-        SandboxState::CleanupFailed => crate::proto::SandboxCleanupState::Failed,
-        _ => crate::proto::SandboxCleanupState::Unspecified,
+/// The cleanup that owns a row with this status, as published.
+pub(super) fn cleanup_owner(status: SandboxStatus) -> crate::proto::SandboxCleanupState {
+    match status.cleanup {
+        Some(CleanupState::Required) => crate::proto::SandboxCleanupState::Required,
+        Some(CleanupState::Failed) => crate::proto::SandboxCleanupState::Failed,
+        None => crate::proto::SandboxCleanupState::Unspecified,
     }
 }
 

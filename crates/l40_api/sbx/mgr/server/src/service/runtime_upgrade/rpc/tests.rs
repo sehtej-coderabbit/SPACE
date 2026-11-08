@@ -25,7 +25,7 @@ use crate::proto::{
 };
 use crate::service::SandboxManagerService;
 use crate::service::activation_support::internal_request;
-use crate::state::SandboxState;
+use crate::state::{SandboxState, SandboxStatus};
 
 const POD_NETNS: &str = "/var/run/netns/cni-runtime-upgrade";
 const POD_UID: &str = "4f6b0d4e-6a59-4b5c-9e43-3a1d0d6f2a10";
@@ -1531,8 +1531,8 @@ async fn an_activation_meeting_a_moving_sandbox_is_retryable() {
 async fn a_stopped_target_meeting_a_moving_sandbox_is_retryable() {
     for state in [
         SandboxState::Stopping,
-        SandboxState::CleanupRequired,
-        SandboxState::CleanupFailed,
+        SandboxStatus::CLEANUP_REQUIRED,
+        SandboxStatus::CLEANUP_FAILED,
     ] {
         let f = fixture(state, false, FakeNodeManager::default());
         let target = certified_target(&f.source);

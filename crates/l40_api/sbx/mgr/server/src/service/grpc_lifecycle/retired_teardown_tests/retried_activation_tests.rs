@@ -508,7 +508,7 @@ async fn a_retry_waiting_on_a_rollback_cleanup_sees_its_receipt() {
             crate::db::InsertSandboxParams {
                 id: &id,
                 uuid8: &SandboxRuntimeLabel::from_sandbox_id(sandbox_id),
-                state: SandboxState::Suspended,
+                state: SandboxState::Suspended.into(),
                 template: "active-template",
                 template_hash: Some(&template_hash.to_string()),
                 user: &SandboxOwner::parse("user").unwrap(),

@@ -345,7 +345,7 @@ fn rollback_replaces_optional_sidecars_or_reports_unremovable_stale_evidence() {
     }
 }
 
-fn sandbox_state(conn: &crate::db::Connection, id: &str) -> SandboxState {
+fn sandbox_state(conn: &crate::db::Connection, id: &str) -> SandboxStatus {
     crate::db::get_sandbox(conn, id).unwrap().unwrap().state
 }
 
@@ -396,35 +396,36 @@ fn full_rollback_restage_writes_only_over_a_stopped_row() {
         AlreadySuspended,
         Refused(String),
     }
-    for state in SandboxState::all() {
-        let expected = match state {
-            SandboxState::Stopped => Expected::Restaged,
-            SandboxState::Suspended => Expected::AlreadySuspended,
+    for state in SandboxStatus::sweep() {
+        let expected = match state.unowned() {
+            Some(SandboxState::Stopped) => Expected::Restaged,
+            Some(SandboxState::Suspended) => Expected::AlreadySuspended,
             // The generic guard: a deleting row owns its `delete_row` cleanup.
-            SandboxState::Deleting => Expected::Refused(
+            Some(SandboxState::Deleting) => Expected::Refused(
                 "complete process snapshot suspension: sandbox state write was not applied: \
                  superseded_by_cleanup_episode"
                     .to_string(),
             ),
-            SandboxState::Quarantined => Expected::Refused(
+            Some(SandboxState::Quarantined) => Expected::Refused(
                 "complete process snapshot suspension: sandbox state write was not applied: \
                  blocked_by_quarantine"
                     .to_string(),
             ),
-            SandboxState::Creating
-            | SandboxState::Created
-            | SandboxState::Starting
-            | SandboxState::Started
-            | SandboxState::Stopping
-            | SandboxState::Pausing
-            | SandboxState::Paused
-            | SandboxState::Resuming
-            | SandboxState::Checkpointing
-            | SandboxState::Suspending
-            | SandboxState::Restoring
-            | SandboxState::CleanupRequired
-            | SandboxState::CleanupFailed
-            | SandboxState::Failed => Expected::Refused(format!(
+            Some(
+                SandboxState::Creating
+                | SandboxState::Created
+                | SandboxState::Starting
+                | SandboxState::Started
+                | SandboxState::Stopping
+                | SandboxState::Pausing
+                | SandboxState::Paused
+                | SandboxState::Resuming
+                | SandboxState::Checkpointing
+                | SandboxState::Suspending
+                | SandboxState::Restoring
+                | SandboxState::Failed,
+            )
+            | None => Expected::Refused(format!(
                 "complete process snapshot suspension: sandbox state write was superseded: \
                  sandbox is {state}"
             )),

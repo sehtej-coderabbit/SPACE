@@ -18,7 +18,7 @@ use crate::guest_filesystem_flush::GuestSnapshotPreparationBudget;
 use crate::service::SandboxManagerService;
 use crate::service::suspend_snapshot_publication::publish_suspend_snapshot_dir;
 use crate::service::suspend_snapshot_publication::write_full_suspend_artifact;
-use crate::state::SandboxState;
+use crate::state::{SandboxState, SandboxStatus};
 use pplx_space_common_core::types::{
     AutoLifecyclePolicy, HostCpu, LocalArtifactId, SandboxId, SandboxOwner, SandboxRuntimeLabel,
 };
@@ -765,7 +765,7 @@ fn insert_suspended_test_sandbox(conn: &crate::db::Connection, sandbox_id: &str)
             guest_image: Default::default(),
             id: sandbox_id,
             uuid8: &uuid8,
-            state: SandboxState::Suspended,
+            state: SandboxState::Suspended.into(),
             template: "seed",
             template_hash: Some("hash"),
             user: &owner,
@@ -2818,7 +2818,7 @@ async fn suspend_publication_failure_after_staging_preserves_only_owned_evidence
         } else {
             assert_eq!(
                 stored_sandbox(&service, &id).map(|row| row.state),
-                final_state,
+                final_state.map(SandboxStatus::from),
                 "{case}"
             );
         }

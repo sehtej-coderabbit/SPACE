@@ -417,7 +417,7 @@ impl SandboxManagerService {
                     guest_image,
                     id: &id,
                     uuid8: &uuid8,
-                    state: SandboxState::Creating,
+                    state: SandboxState::Creating.into(),
                     template,
                     template_hash: Some(&template_hash),
                     user: sandbox_owner,
@@ -700,7 +700,7 @@ impl SandboxManagerService {
         self.ensure_snapshot_restore_supported("start_from_checkpoint")?;
 
         let id = &sandbox.id;
-        let original_state = sandbox.state;
+        let original_state = sandbox.state.lifecycle;
         let mut uuid8 = sandbox.uuid8.clone();
         let cache_root = self.cache_root();
         let prepare_source = start_stage_timeout(
@@ -929,7 +929,7 @@ impl SandboxManagerService {
                 .await;
             let db = self.db_conn()?;
             let restored_state =
-                crate::db::rollback_restoring_episode(&db, id, sandbox.state, cleanup_id)
+                crate::db::rollback_restoring_episode(&db, id, sandbox.state.lifecycle, cleanup_id)
                     .inspect_err(|error| {
                         tracing::warn!(
                             sandbox_id = %id,

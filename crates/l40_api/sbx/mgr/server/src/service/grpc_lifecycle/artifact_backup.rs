@@ -175,28 +175,29 @@ pub(super) fn artifact_backup_format(
 }
 
 pub(super) fn current_instance_backup_precondition(
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     expected_kind: pplx_space_common_core::types::ArtifactKind,
 ) -> Result<(), Status> {
     use pplx_space_common_core::types::ArtifactKind;
-    let current_kind = match state {
-        SandboxState::Stopped => ArtifactKind::Disk,
-        SandboxState::Suspended => ArtifactKind::Full,
-        SandboxState::Restoring if expected_kind == ArtifactKind::Full => {
+    let state = state.into();
+    let current_kind = match state.unowned() {
+        Some(SandboxState::Stopped) => ArtifactKind::Disk,
+        Some(SandboxState::Suspended) => ArtifactKind::Full,
+        Some(SandboxState::Restoring) if expected_kind == ArtifactKind::Full => {
             return Err(Status::failed_precondition(format!(
                 "cannot back up current instance: {}",
                 pplx_space_common_core::node_drain_signals::REUPLOAD_SANDBOX_RESTORING_MARKER
             )));
         }
-        SandboxState::Failed => {
+        Some(SandboxState::Failed) => {
             return Err(Status::failed_precondition(format!(
                 "cannot back up current instance: {}",
                 pplx_space_common_core::artifact_backup_signals::CURRENT_INSTANCE_BACKUP_SANDBOX_FAILED_MARKER
             )));
         }
-        other => {
+        _ => {
             return Err(Status::failed_precondition(format!(
-                "cannot back up current instance: sandbox is {other}, must be stopped or suspended"
+                "cannot back up current instance: sandbox is {state}, must be stopped or suspended"
             )));
         }
     };
@@ -744,8 +745,9 @@ impl SandboxManagerService {
             | None => {
                 current_instance_backup_precondition(sandbox.state, expected_kind)?;
                 let mut skip_ready_lookup = false;
-                let current_id = match (sandbox.state, sandbox.current_local_artifact_id) {
-                    (SandboxState::Suspended, None) => {
+                let current_id = match (sandbox.state.unowned(), sandbox.current_local_artifact_id)
+                {
+                    (Some(SandboxState::Suspended), None) => {
                         let sandbox_dir =
                             std::path::PathBuf::from(format!("{CACHE_DIR}/{}", sandbox.id));
                         let local_path = canonical_suspend_snapshot_dir(&sandbox_dir)
@@ -775,7 +777,7 @@ impl SandboxManagerService {
                         skip_ready_lookup = current_id == id;
                         current_id
                     }
-                    (SandboxState::Stopped, None) => {
+                    (Some(SandboxState::Stopped), None) => {
                         let id = LocalArtifactId::new();
                         let snapshot_name = format!("d-stop-{id}");
                         let mut node_client =
@@ -1279,11 +1281,9 @@ impl SandboxManagerService {
                 return Ok(Some(generation));
             }
         }
-        let pinned_by_teardown = matches!(
-            sandbox.state,
-            SandboxState::Suspending | SandboxState::CleanupRequired | SandboxState::CleanupFailed
-        ) && sandbox.current_local_artifact_id
-            == Some(artifact.local_artifact_id);
+        let pinned_by_teardown = (sandbox.state == SandboxState::Suspending
+            || sandbox.state.is_cleanup_owned())
+            && sandbox.current_local_artifact_id == Some(artifact.local_artifact_id);
         if !pinned_by_teardown {
             return Ok(None);
         }

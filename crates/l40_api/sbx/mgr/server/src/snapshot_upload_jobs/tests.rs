@@ -1270,7 +1270,7 @@ fn absent_volume_manager_socket() -> std::path::PathBuf {
 /// states keep the projection.
 #[test]
 fn suspend_uncommitted_follows_the_row_state_and_its_pin() {
-    use crate::state::SandboxState;
+    use crate::state::{SandboxState, SandboxStatus};
     use pplx_space_common_core::types::{ArtifactKind, ArtifactOrigin};
 
     let capture = LocalArtifactId::new();
@@ -1290,8 +1290,8 @@ fn suspend_uncommitted_follows_the_row_state_and_its_pin() {
         (SandboxState::Suspended, Some(pinned.as_str()), false),
         // A later suspend committed another capture.
         (SandboxState::Suspended, Some(other.as_str()), true),
-        (SandboxState::CleanupRequired, Some(other.as_str()), false),
-        (SandboxState::CleanupFailed, None, false),
+        (SandboxStatus::CLEANUP_REQUIRED, Some(other.as_str()), false),
+        (SandboxStatus::CLEANUP_FAILED, None, false),
         (SandboxState::Quarantined, None, true),
         (SandboxState::Stopped, None, false),
     ];

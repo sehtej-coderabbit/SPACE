@@ -37,7 +37,7 @@ pub enum InsertSandboxWithCleanupEpisodeError {
         "sandbox state {sandbox_state} does not match cleanup activation state {activation_state}"
     )]
     ActivationStateMismatch {
-        sandbox_state: SandboxState,
+        sandbox_state: SandboxStatus,
         activation_state: SandboxState,
     },
 }
@@ -411,8 +411,9 @@ pub fn retire_stale_armed_cleanup_episode(
     conn: &Connection,
     sandbox_id: &str,
     cleanup_id: SandboxCleanupEpisodeId,
-    observed_state: SandboxState,
+    observed_state: impl Into<SandboxStatus>,
 ) -> Result<bool> {
+    let observed_state = observed_state.into();
     let tx = immediate_transaction(conn)?;
     let Some(episode) = cleanup_episode(&tx, sandbox_id)? else {
         tx.commit()?;
@@ -421,7 +422,7 @@ pub fn retire_stale_armed_cleanup_episode(
     if episode.id != cleanup_id
         || episode.completion == CleanupCompletion::DeletePoolClone
         || episode.requested_at.is_some()
-        || episode.activation_state == observed_state
+        || observed_state == episode.activation_state
     {
         tx.commit()?;
         return Ok(false);
@@ -438,14 +439,16 @@ pub fn retire_stale_armed_cleanup_episode(
                     cleanup_keep_filesystem = NULL,
                     state = CASE WHEN cleanup_state IS NULL THEN state ELSE 'stopping' END
               WHERE id = ?1
-                AND ((cleanup_state IS NULL AND state = ?2) OR ?2 = 'cleanup_' || cleanup_state)
+                AND state = ?2
+                AND cleanup_state IS ?5
                 AND cleanup_completion = ?3
                 AND cleanup_keep_filesystem = ?4",
             params![
                 sandbox_id,
-                observed_state.as_str(),
+                observed_state.lifecycle.as_str(),
                 episode.completion.as_str(),
                 episode.keep_filesystem,
+                observed_state.cleanup.map(CleanupState::as_str),
             ],
         )?;
     }
@@ -536,16 +539,19 @@ pub fn request_cleanup_episode(
             changed: episode_changed,
         });
     }
+    let requested = current_status(&tx, sandbox_id)?;
     tx.commit()?;
-    emit_sandbox_state_event(
-        sandbox_id,
-        SandboxEventType::CleanupRequested,
-        previous_state.as_ref().map(SandboxState::as_str),
-        reason_code.as_str(),
-        "request_cleanup_episode",
-        SandboxState::CleanupRequired,
-        Some(failure_message),
-    );
+    if let Some(requested) = requested {
+        emit_sandbox_state_event(
+            sandbox_id,
+            SandboxEventType::CleanupRequested,
+            previous_state,
+            reason_code.as_str(),
+            "request_cleanup_episode",
+            requested,
+            Some(failure_message),
+        );
+    }
     Ok(CleanupEpisodeRequestOutcome::Requested)
 }
 
@@ -566,7 +572,7 @@ pub fn record_cleanup_episode_failure(
         params![failure_message, sandbox_id, cleanup_id.to_string()],
     )?;
     let previous_state = if changed == 1 {
-        current_state_label(&tx, sandbox_id)?.and_then(|state| state.parse::<SandboxState>().ok())
+        current_status_if_known(&tx, sandbox_id)?
     } else {
         None
     };
@@ -590,14 +596,18 @@ pub fn record_cleanup_episode_failure(
         )?;
     }
     tx.commit()?;
-    if state_changed == 1 && previous_state == Some(SandboxState::CleanupRequired) {
+    // The write sets only the cleanup state; the lifecycle under it stays.
+    if state_changed == 1
+        && let Some(previous) = previous_state
+        && previous.cleanup == Some(CleanupState::Required)
+    {
         emit_sandbox_state_event(
             sandbox_id,
             SandboxEventType::CleanupFailed,
-            Some(SandboxState::CleanupRequired.as_str()),
+            Some(previous),
             "activation_cleanup_failed",
             "record_cleanup_episode_failure",
-            SandboxState::CleanupFailed,
+            SandboxStatus::owned(previous.lifecycle, CleanupState::Failed),
             Some(failure_message),
         );
     }
@@ -1021,7 +1031,7 @@ pub fn complete_cleanup_episode_for_job(
         return Ok(None);
     }
 
-    let previous_state = current_state_label(&tx, sandbox_id)?;
+    let previous_status = current_status_if_known(&tx, sandbox_id)?;
     validate_cleanup_completion_artifact(&tx, sandbox_id, &episode)?;
     let recovery = match match_quarantine_recovery(&tx, sandbox_id, cleanup_id, &episode)? {
         QuarantineRecoveryMatch::NotApplicable => None,
@@ -1066,7 +1076,7 @@ pub fn complete_cleanup_episode_for_job(
     if episode.completion == CleanupCompletion::Quarantine {
         emit_sandbox_quarantined_event(
             sandbox_id,
-            previous_state.as_deref(),
+            previous_status,
             episode
                 .quarantine_reason_code
                 .unwrap_or(SandboxQuarantineReasonCode::RuntimeProbeInconsistent),
@@ -1080,7 +1090,7 @@ pub fn complete_cleanup_episode_for_job(
         emit_sandbox_state_event(
             sandbox_id,
             SandboxEventType::QuarantineRecovered,
-            Some(SandboxState::Quarantined.as_str()),
+            Some(SandboxState::Quarantined.into()),
             recovery.reason_code.as_str(),
             "complete_cleanup_episode",
             SandboxState::Suspended,
@@ -1106,18 +1116,20 @@ db_private_outside_tests! {
     /// retained rootfs may be the only copy of the sandbox's latest work. The
     /// failure reason is the durable witness for that distinct safety condition.
     fn sandbox_erase_safety(
-        state: SandboxState,
+        state: impl Into<SandboxStatus>,
         cleanup_completion: Option<CleanupCompletion>,
         failure_reason: Option<&str>,
     ) -> SandboxEraseSafety {
+        let state = state.into();
         if state == SandboxState::Suspending
-            || (matches!(
-                state,
-                SandboxState::CleanupRequired | SandboxState::CleanupFailed
-            ) && cleanup_completion == Some(CleanupCompletion::MarkSuspended))
+            || (state.is_cleanup_owned()
+                && cleanup_completion == Some(CleanupCompletion::MarkSuspended))
         {
             SandboxEraseSafety::SuspendPublicationPending
-        } else if matches!(state, SandboxState::Failed | SandboxState::Quarantined)
+        } else if matches!(
+            state.unowned(),
+            Some(SandboxState::Failed | SandboxState::Quarantined)
+        )
             && failure_reason == Some(SUSPEND_PUBLISH_FAILED_NO_ARTIFACT_RUNTIME_GONE)
         {
             SandboxEraseSafety::RetainedFilesystemOnlyCopy
@@ -1386,7 +1398,7 @@ pub fn complete_row_intent_cleanup_for_job(
             &tx,
             &QuarantineEpisode {
                 sandbox_id,
-                entered_from_state: Some(row.state.as_str()),
+                entered_from_state: Some(row.state.legacy_label()),
                 source: SandboxQuarantineSource::SbxManager,
                 reason_code: SandboxQuarantineReasonCode::SuspendSnapshotPublicationFailed,
                 reason_message: failure_reason,
@@ -1400,7 +1412,7 @@ pub fn complete_row_intent_cleanup_for_job(
             &tx,
             &QuarantineEpisode {
                 sandbox_id,
-                entered_from_state: Some(row.state.as_str()),
+                entered_from_state: Some(row.state.legacy_label()),
                 source: SandboxQuarantineSource::SbxManager,
                 reason_code: quarantine_reason,
                 reason_message: failure_reason,
@@ -1426,7 +1438,7 @@ pub fn complete_row_intent_cleanup_for_job(
     if missing_suspend_artifact || quarantine_completion {
         emit_sandbox_quarantined_event(
             sandbox_id,
-            Some(row.state.as_str()),
+            Some(row.state),
             quarantine_reason,
             "complete_row_intent_cleanup",
             None,
@@ -1463,10 +1475,7 @@ pub fn quarantine_cleanup_episode_for_job(
         tx.commit()?;
         return Ok(false);
     };
-    if !matches!(
-        row.state,
-        SandboxState::CleanupRequired | SandboxState::CleanupFailed
-    ) {
+    if !row.state.is_cleanup_owned() {
         tx.commit()?;
         return Ok(false);
     }
@@ -1492,16 +1501,18 @@ pub fn quarantine_cleanup_episode_for_job(
                 END,
                 updated_at = ?2
           WHERE id = ?3
-            AND ((cleanup_state IS NULL AND state = ?4) OR ?4 = 'cleanup_' || cleanup_state)
+            AND state = ?4
+            AND cleanup_state IS ?7
             AND cleanup_completion = ?5
             AND cleanup_keep_filesystem = ?6",
         params![
             reason,
             timestamp,
             sandbox_id,
-            row.state.as_str(),
+            row.state.lifecycle.as_str(),
             episode.completion.as_str(),
             episode.keep_filesystem,
+            row.state.cleanup.map(CleanupState::as_str),
         ],
     )?;
     if changed == 1 {
@@ -1510,7 +1521,7 @@ pub fn quarantine_cleanup_episode_for_job(
             &tx,
             &QuarantineEpisode {
                 sandbox_id,
-                entered_from_state: Some(row.state.as_str()),
+                entered_from_state: Some(row.state.legacy_label()),
                 source: SandboxQuarantineSource::SbxManager,
                 reason_code,
                 reason_message: Some(&reason),
@@ -1535,7 +1546,7 @@ pub fn quarantine_cleanup_episode_for_job(
     if changed == 1 {
         emit_sandbox_quarantined_event(
             sandbox_id,
-            Some(row.state.as_str()),
+            Some(row.state),
             reason_code,
             "quarantine_cleanup_episode",
             Some(&reason),
@@ -1553,11 +1564,8 @@ pub fn mark_cleanup_required(
 ) -> Result<()> {
     let reason = reason.trim();
     let reason = (!reason.is_empty()).then_some(reason);
-    let previous_state = current_state_label(conn, id)?;
-    let previous_state_value = previous_state
-        .as_deref()
-        .and_then(|state| state.parse::<SandboxState>().ok());
-    if generic_writer_transition_blocked(previous_state_value, SandboxState::CleanupRequired) {
+    let previous_state = current_status_if_known(conn, id)?;
+    if quarantine_blocks_cleanup(previous_state) {
         tracing::warn!(
             sandbox_id = %id,
             "ignored mark_cleanup_required because sandbox is quarantined"
@@ -1607,7 +1615,7 @@ pub fn mark_cleanup_required_if_no_intent(
 pub fn mark_cleanup_required_if_no_intent_in_state(
     conn: &Connection,
     id: &str,
-    expected_state: SandboxState,
+    expected_state: impl Into<SandboxStatus>,
     keep_filesystem: bool,
     completion: CleanupCompletion,
     reason: &str,
@@ -1618,7 +1626,7 @@ pub fn mark_cleanup_required_if_no_intent_in_state(
         keep_filesystem,
         completion,
         reason,
-        Some(expected_state),
+        Some(expected_state.into()),
     )
 }
 
@@ -1628,15 +1636,12 @@ fn mark_cleanup_required_if_no_intent_inner(
     keep_filesystem: bool,
     completion: CleanupCompletion,
     reason: &str,
-    expected_state: Option<SandboxState>,
+    expected_state: Option<SandboxStatus>,
 ) -> Result<bool> {
     let reason = reason.trim();
     let reason = (!reason.is_empty()).then_some(reason);
-    let previous_state = current_state_label(conn, id)?;
-    let previous_state_value = previous_state
-        .as_deref()
-        .and_then(|state| state.parse::<SandboxState>().ok());
-    if generic_writer_transition_blocked(previous_state_value, SandboxState::CleanupRequired) {
+    let previous_state = current_status_if_known(conn, id)?;
+    if quarantine_blocks_cleanup(previous_state) {
         tracing::warn!(
             sandbox_id = %id,
             "ignored mark_cleanup_required_if_no_intent because sandbox is quarantined"
@@ -1666,26 +1671,29 @@ fn mark_cleanup_required_if_no_intent_inner(
            AND state != 'quarantined'
            AND cleanup_completion IS NULL
            AND cleanup_keep_filesystem IS NULL
-           AND (?6 IS NULL
-                OR (cleanup_state IS NULL AND state = ?6)
-                OR ?6 = 'cleanup_' || cleanup_state)",
+           AND (?6 IS NULL OR (state = ?6 AND cleanup_state IS ?7))",
         params![
             reason,
             completion.as_str(),
             keep_filesystem,
             now()?,
             id,
-            expected_state.map(|state| state.as_str()),
+            expected_state.map(|state| state.lifecycle.as_str()),
+            expected_state
+                .and_then(|state| state.cleanup)
+                .map(CleanupState::as_str),
         ],
     )?;
-    if changed == 1 {
+    if changed == 1
+        && let Some(requested) = current_status_if_known(conn, id)?
+    {
         emit_sandbox_state_event(
             id,
             SandboxEventType::CleanupRequested,
-            previous_state.as_deref(),
+            previous_state,
             reason.unwrap_or("cleanup_required"),
             "mark_cleanup_required_if_no_intent",
-            SandboxState::CleanupRequired,
+            requested,
             None,
         );
     }
@@ -1727,11 +1735,8 @@ pub fn mark_cleanup_failed(
 ) -> Result<bool> {
     let reason = reason.trim();
     let reason = (!reason.is_empty()).then_some(reason);
-    let previous_state = current_state_label(conn, id)?;
-    let previous_state_value = previous_state
-        .as_deref()
-        .and_then(|state| state.parse::<SandboxState>().ok());
-    if generic_writer_transition_blocked(previous_state_value, SandboxState::CleanupFailed) {
+    let previous_state = current_status_if_known(conn, id)?;
+    if quarantine_blocks_cleanup(previous_state) {
         tracing::warn!(
             sandbox_id = %id,
             "ignored mark_cleanup_failed because sandbox is quarantined"
@@ -1758,14 +1763,17 @@ pub fn mark_cleanup_failed(
            AND state != 'quarantined'",
         params![reason, completion.as_str(), keep_filesystem, now()?, id],
     )?;
-    if changed != 0 && previous_state_value != Some(SandboxState::CleanupFailed) {
+    if changed != 0
+        && previous_state.is_none_or(|previous| previous.cleanup != Some(CleanupState::Failed))
+        && let Some(failed) = current_status_if_known(conn, id)?
+    {
         emit_sandbox_state_event(
             id,
             SandboxEventType::CleanupFailed,
-            previous_state.as_deref(),
+            previous_state,
             "cleanup_failed",
             "mark_cleanup_failed",
-            SandboxState::CleanupFailed,
+            failed,
             reason,
         );
     }
@@ -1842,19 +1850,17 @@ db_private_outside_tests! {
                 [id],
                 |row| {
                     Ok((
-                        SandboxState::label_from_columns(
-                            row.get(0)?,
-                            row.get::<_, Option<String>>(2)?.as_deref(),
-                        ),
+                        row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((state, intent)) = intent else {
+        let Some((state, intent, cleanup)) = intent else {
             return Ok(false);
         };
-        let Ok(state) = state.parse::<SandboxState>() else {
+        let Some(state) = SandboxStatus::from_columns(&state, cleanup.as_deref()) else {
             return Ok(false);
         };
         let intent = intent

@@ -343,12 +343,13 @@ async fn restarted_claim_retries_without_blocking_other_completions() {
 // nextest runs them in parallel; the test name is what identifies a failing
 // case. `rstest` is not a dependency of this crate and this split adds none.
 async fn lifecycle_and_job_completion_commit_together_and_recover(
-    initial: SandboxState,
+    initial: impl Into<SandboxStatus>,
     completion: CleanupCompletion,
     activation: Option<crate::db::ActivationKind>,
     artifact: bool,
     target: Option<SandboxState>,
 ) {
+    let initial = initial.into();
     use crate::db::ActivationKind::Restore;
     use crate::service::tests::service_tests::register_full_suspend_artifact;
     use CleanupCompletion::Quarantine;
@@ -555,7 +556,7 @@ async fn lifecycle_and_job_completion_commit_together_and_recover(
         crate::db::get_sandbox(&service.db.lock().unwrap(), &subject)
             .unwrap()
             .map(|row| row.state),
-        target
+        target.map(SandboxStatus::from)
     );
     assert!(
         crate::db::cleanup_episode(&service.db.lock().unwrap(), &subject)
@@ -697,7 +698,7 @@ async fn lifecycle_commit_and_recovery_interrupted_cold_start_from_stopped() {
 #[tokio::test]
 async fn lifecycle_commit_and_recovery_cleanup_required_quarantine() {
     lifecycle_and_job_completion_commit_together_and_recover(
-        SandboxState::CleanupRequired,
+        SandboxStatus::CLEANUP_REQUIRED,
         CleanupCompletion::Quarantine,
         None,
         false,

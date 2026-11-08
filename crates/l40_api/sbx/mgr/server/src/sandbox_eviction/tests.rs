@@ -173,8 +173,17 @@ fn open_test_db() -> Connection {
 }
 
 fn insert_sandbox(conn: &Connection, id: &str, state: &str, updated_at_secs: u64) {
+    // The labels name a row's status as it read before the cleanup-state split.
+    let status = match state {
+        "cleanup_required" => crate::state::SandboxStatus::CLEANUP_REQUIRED,
+        "cleanup_failed" => crate::state::SandboxStatus::CLEANUP_FAILED,
+        lifecycle => lifecycle
+            .parse::<crate::state::SandboxState>()
+            .unwrap()
+            .into(),
+    };
     let (lifecycle, cleanup_state) =
-        crate::db::test_fixtures::state_write_fixtures::stored_columns(state.parse().unwrap());
+        crate::db::test_fixtures::state_write_fixtures::stored_columns(status);
     conn.execute(
         "INSERT INTO sandboxes (
              id, uuid8, state, cleanup_state, template, user, runtime, created_at, updated_at,

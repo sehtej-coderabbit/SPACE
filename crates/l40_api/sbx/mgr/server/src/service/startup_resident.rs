@@ -23,8 +23,8 @@ impl SandboxManagerService {
         let failed = AtomicBool::new(false);
         stream::iter(rows.into_iter().filter(|row| {
             matches!(
-                row.state,
-                SandboxState::Paused | SandboxState::Resuming | SandboxState::Checkpointing
+                row.state.unowned(),
+                Some(SandboxState::Paused | SandboxState::Resuming | SandboxState::Checkpointing)
             )
         }))
         .take_while(|_| std::future::ready(!failed.load(Ordering::Relaxed)))
@@ -65,7 +65,7 @@ impl SandboxManagerService {
     ) -> Result<(), Status> {
         prepare_resident_peer(
             &row.id,
-            row.state,
+            row.state.lifecycle,
             target,
             &row.process_env,
             self.connect_spaced_host_with_policy(row, SpacedEndpointProofPolicy::ValidateOnly),
@@ -151,10 +151,12 @@ impl SandboxManagerService {
         Prepare: FnOnce(SandboxState) -> PrepareFuture,
         PrepareFuture: std::future::Future<Output = Result<(), Status>>,
     {
-        let reason_code = match row.state {
-            SandboxState::Paused => SandboxQuarantineReasonCode::RuntimeProbeInconsistent,
-            SandboxState::Resuming => SandboxQuarantineReasonCode::ResidentResumeFailed,
-            SandboxState::Checkpointing => SandboxQuarantineReasonCode::CheckpointResumeFailed,
+        let reason_code = match row.state.unowned() {
+            Some(SandboxState::Paused) => SandboxQuarantineReasonCode::RuntimeProbeInconsistent,
+            Some(SandboxState::Resuming) => SandboxQuarantineReasonCode::ResidentResumeFailed,
+            Some(SandboxState::Checkpointing) => {
+                SandboxQuarantineReasonCode::CheckpointResumeFailed
+            }
             _ => return Err(crate::db::Error::invalid_query().into()),
         };
         // Resume uses the wake lock; teardown/activation uses the cleanup

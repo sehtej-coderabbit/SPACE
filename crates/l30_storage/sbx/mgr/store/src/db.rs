@@ -56,7 +56,9 @@ pub mod transfer;
 
 use crate::endpoint_proof::SpacedEndpointProof;
 use crate::restore_operation::{RemoteRestoreOperation, RestoreOrigin};
-use crate::state::{SandboxState, SandboxStatusEventDetails, StateTransitionError};
+use crate::state::{
+    CleanupState, SandboxState, SandboxStatus, SandboxStatusEventDetails, StateTransitionError,
+};
 use pplx_space_common_core::types::{PodUid, RouteGeneration, SpaceApiRouteIdentity};
 
 const DB_PATH: &str = pplx_space_common_core::host::linux::paths::SANDBOX_MANAGER_DB;
@@ -272,20 +274,21 @@ impl CleanupCompletion {
         self.owns_intent(row.state, row.cleanup_completion)
     }
 
-    fn owns_intent(self, state: SandboxState, intent: Option<Self>) -> bool {
-        let persisted_intent = matches!(
-            state,
-            SandboxState::CleanupRequired | SandboxState::CleanupFailed
-        ) && intent == Some(self);
+    /// A cleanup owns a row through its persisted intent; without one, a
+    /// required cleanup is quarantined, and a plain teardown transition owns
+    /// its natural completion.
+    fn owns_intent(self, status: SandboxStatus, intent: Option<Self>) -> bool {
+        let persisted_intent = status.is_cleanup_owned() && intent == Some(self);
         match self {
             Self::MarkCreated => persisted_intent,
-            Self::MarkStopped => state == SandboxState::Stopping || persisted_intent,
-            Self::MarkSuspended => state == SandboxState::Suspending || persisted_intent,
+            Self::MarkStopped => status == SandboxState::Stopping || persisted_intent,
+            Self::MarkSuspended => status == SandboxState::Suspending || persisted_intent,
             Self::Quarantine => {
-                persisted_intent || (state == SandboxState::CleanupRequired && intent.is_none())
+                persisted_intent
+                    || (status.cleanup == Some(CleanupState::Required) && intent.is_none())
             }
             Self::DeleteRow | Self::DeletePoolClone => {
-                state == SandboxState::Deleting || persisted_intent
+                status == SandboxState::Deleting || persisted_intent
             }
         }
     }
@@ -417,26 +420,19 @@ fn u64_to_sql_i64(value: u64) -> i64 {
 fn emit_sandbox_state_event(
     id: &str,
     event_type: SandboxEventType,
-    from_state: Option<&str>,
+    from_state: Option<SandboxStatus>,
     reason: &str,
     operation: &'static str,
-    to_state: SandboxState,
+    to_state: impl Into<SandboxStatus>,
     error: Option<&str>,
 ) {
     let mut details = SandboxEventDetails::default()
         .reason(reason)
         .operation(operation)
         .trigger(SandboxEventTrigger::System)
-        .with_to_status(to_state);
+        .with_to_status(to_state.into());
     if let Some(from_state) = from_state {
-        // The label was read back from the row; one this binary can't parse
-        // has no known cleanup state.
-        let from_cleanup_state = from_state
-            .parse::<SandboxState>()
-            .map_or("unknown", SandboxState::event_cleanup_state);
-        details = details
-            .with_from_state(from_state)
-            .from_cleanup_state(from_cleanup_state);
+        details = details.with_from_status(from_state);
     }
     if let Some(error) = error {
         details = details.error(error);
@@ -448,7 +444,7 @@ fn emit_sandbox_state_event(
 /// the entry counter, emitted together after the transition commits.
 fn emit_sandbox_quarantined_event(
     id: &str,
-    from_state: Option<&str>,
+    from_state: Option<SandboxStatus>,
     reason_code: SandboxQuarantineReasonCode,
     operation: &'static str,
     error: Option<&str>,
@@ -542,12 +538,17 @@ fn delete_sandbox_child_rows(tx: &Connection, id: &str) -> Result<()> {
 }
 
 fn generic_writer_transition_blocked(
-    previous_state: Option<SandboxState>,
+    previous_state: Option<SandboxStatus>,
     target_state: SandboxState,
 ) -> bool {
     previous_state
         .filter(|state| *state == SandboxState::Quarantined)
         .is_some_and(|state| state.transition(target_state).is_err())
+}
+
+/// Only deletion leaves `quarantined`, so no cleanup takes a quarantined row.
+fn quarantine_blocks_cleanup(previous_state: Option<SandboxStatus>) -> bool {
+    previous_state.is_some_and(|state| state == SandboxState::Quarantined)
 }
 
 fn record_execution_delete_receipt(
@@ -730,22 +731,28 @@ pub mod fixture {
         AutoLifecyclePolicy, SandboxId, SandboxOwner, SandboxRuntimeLabel,
     };
 
-    use crate::state::SandboxState;
+    use crate::state::SandboxStatus;
 
     pub use rusqlite::trace::{TraceEvent, TraceEventCodes};
     pub use rusqlite::types::{Type, Value};
     pub use rusqlite::{StatementStatus, params};
 
-    pub fn insert_test_sandbox(conn: &crate::db::Connection, id: &str, state: SandboxState) {
+    /// Insert a row with `state`.
+    pub fn insert_test_sandbox(
+        conn: &crate::db::Connection,
+        id: &str,
+        state: impl Into<SandboxStatus>,
+    ) {
         insert_test_sandbox_with_policy(conn, id, state, &AutoLifecyclePolicy::disabled());
     }
 
     pub fn insert_test_sandbox_with_policy(
         conn: &crate::db::Connection,
         id: &str,
-        state: SandboxState,
+        state: impl Into<SandboxStatus>,
         auto_lifecycle: &AutoLifecyclePolicy,
     ) {
+        let status = state.into();
         let sandbox_id = SandboxId::from_str(id).unwrap();
         let uuid8 = SandboxRuntimeLabel::from_sandbox_id(sandbox_id);
         let user = SandboxOwner::parse("user").unwrap();
@@ -755,7 +762,7 @@ pub mod fixture {
                 guest_image: Default::default(),
                 id,
                 uuid8: &uuid8,
-                state,
+                state: status,
                 template: "seed",
                 template_hash: Some("hash"),
                 user: &user,

@@ -1281,8 +1281,8 @@ impl SandboxManagerService {
             || sandbox.cleanup_completion == Some(CleanupCompletion::MarkSuspended)
             || (pins_suspend_artifact
                 && !matches!(
-                    sandbox.state,
-                    SandboxState::Started | SandboxState::Paused | SandboxState::Stopped
+                    sandbox.state.unowned(),
+                    Some(SandboxState::Started | SandboxState::Paused | SandboxState::Stopped)
                 ))
         {
             return Err(Status::failed_precondition(

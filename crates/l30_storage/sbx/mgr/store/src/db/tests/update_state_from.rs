@@ -16,19 +16,19 @@ use super::update_state_matrix::{
     sweep_lifecycle_pairs_and_cleanup_shapes, sweep_quarantine_episode_and_missing_row, write_from,
 };
 use crate::db::{
-    EDGES, StateSet, StateWriteGuard, StateWriteOutcome, StateWriteRefusal, edges, test_conn,
+    EDGES, EdgeSources, StateWriteGuard, StateWriteOutcome, StateWriteRefusal, edges, test_conn,
     update_state_from,
 };
-use crate::state::SandboxState;
+use crate::state::{SandboxState, SandboxStatus};
 
 const IN_TRANSACTION: [bool; 2] = [false, true];
 
-/// The cases below name each of `SandboxState::all()`, `Shape::ALL` and
+/// The cases below name each of `SandboxStatus::sweep()`, `Shape::ALL` and
 /// `Receipt::ALL` by index.
 #[test]
 fn the_cases_cover_every_state_shape_and_receipt() {
     assert_eq!(
-        SandboxState::all().len(),
+        SandboxStatus::sweep().len(),
         18,
         "add a case for the new state to each #[values(...)] below"
     );
@@ -52,7 +52,7 @@ fn expecting_every_state_answers_every_lifecycle_pair_and_cleanup_shape(
 ) {
     sweep_lifecycle_pairs_and_cleanup_shapes(
         Writer { in_transaction },
-        SandboxState::all()[from],
+        SandboxStatus::sweep()[from],
         Shape::ALL[shape],
     );
 }
@@ -66,12 +66,22 @@ fn expecting_every_state_answers_a_quarantine_episode_and_a_missing_row() {
 
 /// The from-sets each case passes for a row in `from`, and whether each one
 /// contains it: two that exclude it and two accepting controls.
-fn from_sets(from: SandboxState) -> [(&'static str, StateSet, bool); 4] {
+fn from_sets(from: SandboxStatus) -> [(&'static str, EdgeSources, bool); 4] {
+    let (others, only) = match from.cleanup {
+        None => (
+            EdgeSources::ALL.without(from.lifecycle),
+            EdgeSources::of(&[from.lifecycle]),
+        ),
+        Some(cleanup) => (
+            EdgeSources::ALL.without_owned_by(cleanup),
+            EdgeSources::EMPTY.or_owned_by(cleanup),
+        ),
+    };
     [
-        ("every other state", StateSet::ALL.without(from), false),
-        ("no state", StateSet::EMPTY, false),
-        ("only the row's state", StateSet::of(&[from]), true),
-        ("every state", StateSet::ALL, true),
+        ("every other state", others, false),
+        ("no state", EdgeSources::EMPTY, false),
+        ("only the row's state", only, true),
+        ("every state", EdgeSources::ALL, true),
     ]
 }
 
@@ -80,7 +90,7 @@ fn from_sets(from: SandboxState) -> [(&'static str, StateSet, bool); 4] {
 /// writers reject before reading the row. The generic guards answer before
 /// the expectation does, so their refusals do not depend on the from-set.
 fn expected_outcome(
-    from: SandboxState,
+    from: SandboxStatus,
     to: SandboxState,
     from_set_contains_row: bool,
 ) -> Option<StateWriteOutcome> {
@@ -108,7 +118,7 @@ fn a_from_set_without_the_row_state_refuses_and_keeps_every_row(
     #[values(0, 1)] receipt_kind: usize,
     #[values(false, true)] in_transaction: bool,
 ) {
-    let from = SandboxState::all()[from];
+    let from = SandboxStatus::sweep()[from];
     let receipt_kind = Receipt::ALL[receipt_kind];
     for to in SandboxState::all() {
         let receipt = receipt_kind.target(to);
@@ -152,7 +162,7 @@ fn writable(edge: &crate::db::Edge) -> bool {
 fn an_edge_writes_its_target_only_from_its_sources(
     #[values(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)] from: usize,
 ) {
-    let from = SandboxState::all()[from];
+    let from = SandboxStatus::sweep()[from];
     for edge in EDGES.iter().filter(|edge| writable(edge)) {
         let to = edge.to();
         let receipt = Receipt::ForTarget.target(to);

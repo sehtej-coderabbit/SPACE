@@ -348,7 +348,7 @@ impl CleanupFixture {
         std::os::unix::fs::symlink(self.run_dir.path(), sandbox_dir.join("fc.pid")).unwrap();
     }
 
-    fn state(&self, id: &str) -> Option<SandboxState> {
+    fn state(&self, id: &str) -> Option<SandboxStatus> {
         crate::db::get_sandbox(&self.service.db_conn().unwrap(), id)
             .unwrap()
             .map(|row| row.state)
@@ -463,7 +463,7 @@ fn insert_owned_sandbox(conn: &crate::db::Connection, id: &str, owner: &str) {
             guest_image: Default::default(),
             id,
             uuid8: &SandboxRuntimeLabel::from_sandbox_id(sandbox_id),
-            state: SandboxState::Started,
+            state: SandboxState::Started.into(),
             template: "seed",
             template_hash: Some("hash"),
             user: &SandboxOwner::parse(owner.to_owned()).unwrap(),
@@ -986,7 +986,7 @@ fn insert_armed_pool_clone(
             guest_image: Default::default(),
             id: &id.to_string(),
             uuid8: &SandboxRuntimeLabel::from_sandbox_id(id),
-            state: SandboxState::Creating,
+            state: SandboxState::Creating.into(),
             template: "seed",
             template_hash: Some("sha256:test"),
             user: &SandboxOwner::parse(owner.to_owned()).unwrap(),

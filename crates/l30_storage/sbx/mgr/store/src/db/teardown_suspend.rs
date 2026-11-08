@@ -79,7 +79,7 @@ impl FromStr for TeardownSuspendOperationStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeardownSuspendStatus {
-    pub state: SandboxState,
+    pub state: SandboxStatus,
     pub operation: Option<TeardownSuspendOperation>,
     pub artifact: Option<LocalArtifactRow>,
     pub backup_completed: bool,
@@ -539,7 +539,10 @@ db_private_outside_tests! {
         let activation_rolled_back = match &suspend {
             Some(status)
                 if runtime_generation.is_none()
-                    && matches!(status.state, SandboxState::Created | SandboxState::Stopped)
+                    && matches!(
+                        status.state.unowned(),
+                        Some(SandboxState::Created | SandboxState::Stopped)
+                    )
                     && status.operation.as_ref().is_none_or(|operation| {
                         operation.status == TeardownSuspendOperationStatus::Completed
                     }) =>
@@ -566,7 +569,7 @@ db_private_outside_tests! {
 fn completed_activation_rollback_covers(
     conn: &Connection,
     sandbox_id: &str,
-    state: SandboxState,
+    state: SandboxStatus,
     execution_generation: ExecutionGeneration,
 ) -> Result<bool> {
     let receipt = conn.query_row(
@@ -633,7 +636,7 @@ db_private_outside_tests! {
                 |row| {
                     let state_text = row.get::<_, String>(0)?;
                     let cleanup_text = row.get::<_, Option<String>>(6)?;
-                    let state = SandboxState::from_columns(&state_text, cleanup_text.as_deref())
+                    let state = SandboxStatus::from_columns(&state_text, cleanup_text.as_deref())
                         .ok_or_else(|| {
                             rusqlite::Error::FromSqlConversionFailure(
                                 0,

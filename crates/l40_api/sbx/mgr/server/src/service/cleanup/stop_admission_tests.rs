@@ -33,7 +33,7 @@ use super::{
 use crate::db::CleanupCompletion;
 use crate::db::test_fixtures::state_write_fixtures::{assert_unchanged, snapshot};
 use crate::service::tests::service_tests::insert_test_sandbox;
-use crate::state::SandboxState;
+use crate::state::{SandboxState, SandboxStatus};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -69,7 +69,7 @@ async fn shutdown(service: SandboxManagerService) {
 }
 
 /// A row in `state`, with a local restore's columns when it is `restoring`.
-fn insert_row(conn: &crate::db::Connection, state: SandboxState) -> SandboxId {
+fn insert_row(conn: &crate::db::Connection, state: SandboxStatus) -> SandboxId {
     let sandbox_id = SandboxId::new();
     let id = sandbox_id.to_string();
     insert_test_sandbox(conn, &id, state);
@@ -98,8 +98,12 @@ enum Admission {
 
 /// What Stop admission answers for a plain row in `state`. Wildcard-free, so
 /// a new lifecycle state does not compile until it is placed.
-fn admission(state: SandboxState) -> Admission {
-    match state {
+fn admission(state: SandboxStatus) -> Admission {
+    // Stop takes over a cleanup's teardown.
+    if state.is_cleanup_owned() {
+        return Admission::Admitted;
+    }
+    match state.lifecycle {
         SandboxState::Starting
         | SandboxState::Started
         | SandboxState::Stopping
@@ -109,8 +113,6 @@ fn admission(state: SandboxState) -> Admission {
         | SandboxState::Checkpointing
         | SandboxState::Suspending
         | SandboxState::Restoring
-        | SandboxState::CleanupRequired
-        | SandboxState::CleanupFailed
         | SandboxState::Failed => Admission::Admitted,
         SandboxState::Creating
         | SandboxState::Created
@@ -131,8 +133,11 @@ fn admission(state: SandboxState) -> Admission {
 
 /// What Delete admission answers for a plain row in `state`. Wildcard-free,
 /// so a new lifecycle state does not compile until it is placed.
-fn delete_admission(state: SandboxState) -> Admission {
-    match state {
+fn delete_admission(state: SandboxStatus) -> Admission {
+    if state.is_cleanup_owned() {
+        return Admission::Admitted;
+    }
+    match state.lifecycle {
         SandboxState::Creating
         | SandboxState::Created
         | SandboxState::Starting
@@ -146,8 +151,6 @@ fn delete_admission(state: SandboxState) -> Admission {
         | SandboxState::Checkpointing
         | SandboxState::Suspended
         | SandboxState::Restoring
-        | SandboxState::CleanupRequired
-        | SandboxState::CleanupFailed
         | SandboxState::Quarantined
         | SandboxState::Failed => Admission::Admitted,
         // Its suspend state has not reached the cluster yet.
@@ -184,7 +187,7 @@ impl Cleanup {
         }
     }
 
-    fn admission(self, state: SandboxState) -> Admission {
+    fn admission(self, state: SandboxStatus) -> Admission {
         match self {
             Self::Stop => admission(state),
             Self::Delete => delete_admission(state),
@@ -195,7 +198,7 @@ impl Cleanup {
     /// Stop, with exactly `message`.
     fn refused(
         self,
-        state: SandboxState,
+        state: SandboxStatus,
         message: Option<&str>,
         result: Result<CleanupAdmission, CleanupAdmissionError>,
     ) -> bool {
@@ -226,7 +229,7 @@ impl Cleanup {
 /// checks that.
 async fn sweep_every_source_state(cleanup: Cleanup) {
     for persist_intent in [true, false] {
-        for state in SandboxState::all() {
+        for state in SandboxStatus::sweep() {
             let case = format!(
                 "{cleanup:?} of {state} ({:?}), persist intent {persist_intent}",
                 cleanup.admission(state)
@@ -381,7 +384,7 @@ async fn stop_rpc_admits_nothing_without_a_live_runtime() {
         return;
     }
     for blocking in [true, false] {
-        for state in SandboxState::all() {
+        for state in SandboxStatus::sweep() {
             let case = format!("{state}, blocking {blocking}");
             let conn = crate::db::test_conn();
             let sandbox_id = insert_row(&conn, state);

@@ -736,16 +736,16 @@ impl SandboxManagerService {
                 let db = self.db_conn()?;
                 crate::db::read::sandbox(&db, &id)
                     .map_err(|e| Status::internal(format!("db error: {e}")))?
-                    .map(|row| (row.state, row.lifecycle, row.cleanup_completion))
+                    .map(|row| (row.state, row.cleanup_completion))
             };
 
-            if let Some((state, lifecycle, completion)) = state {
+            if let Some((state, completion)) = state {
                 if state.completes_wait() {
                     return Ok(Response::new(WaitResponse {
                         sandbox_id: id,
-                        lifecycle: Some(crate::proto::SandboxLifecycleState::from(
-                            super::grpc_state_snapshot::published_lifecycle(state, lifecycle),
-                        ) as i32),
+                        lifecycle: Some(
+                            crate::proto::SandboxLifecycleState::from(state.lifecycle) as i32
+                        ),
                         cleanup: super::grpc_state_snapshot::cleanup_observation(
                             super::grpc_state_snapshot::cleanup_owner(state),
                             completion,
@@ -757,20 +757,8 @@ impl SandboxManagerService {
                 if let Some(timeout) = timeout
                     && start.elapsed() >= timeout
                 {
-                    // Name the status as the response would have published it.
-                    let published =
-                        super::grpc_state_snapshot::published_lifecycle(state, lifecycle);
-                    let current = if published == state {
-                        state.as_str().to_owned()
-                    } else {
-                        format!(
-                            "{}, cleanup {}",
-                            published.as_str(),
-                            state.event_cleanup_state()
-                        )
-                    };
                     return Err(Status::deadline_exceeded(format!(
-                        "sandbox {id} did not reach terminal state within {}s (current: {current})",
+                        "sandbox {id} did not reach terminal state within {}s (current: {state})",
                         timeout.as_secs(),
                     )));
                 }
@@ -944,7 +932,7 @@ impl SandboxManagerService {
                     guest_image: donor.guest_image,
                     id: &new_id,
                     uuid8: &uuid8,
-                    state: SandboxState::Creating,
+                    state: SandboxState::Creating.into(),
                     template,
                     template_hash: Some(&template_hash),
                     user: &sandbox_owner,

@@ -205,10 +205,7 @@ fn a_refused_auto_lifecycle_stop_keeps_a_stopped_disk_pin() {
     assert!(
         matches!(
             outcome,
-            StateWriteOutcome::Refused {
-                found: SandboxState::Stopped,
-                ..
-            }
+            StateWriteOutcome::Refused { found, .. } if found == SandboxState::Stopped
         ),
         "{outcome:?}"
     );
@@ -320,10 +317,7 @@ fn a_refused_warm_restage_keeps_a_suspend_pin() {
     assert!(
         matches!(
             outcome,
-            StateWriteOutcome::Refused {
-                found: SandboxState::Suspended,
-                ..
-            }
+            StateWriteOutcome::Refused { found, .. } if found == SandboxState::Suspended
         ),
         "{outcome:?}"
     );

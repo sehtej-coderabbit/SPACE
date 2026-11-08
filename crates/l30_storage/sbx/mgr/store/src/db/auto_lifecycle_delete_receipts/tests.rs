@@ -39,7 +39,7 @@ fn insert_sandbox(conn: &Connection, sandbox_id: SandboxId) -> AutoLifecycleDele
             guest_image: Default::default(),
             id: &sandbox_id.to_string(),
             uuid8: &runtime_label,
-            state: crate::state::SandboxState::Started,
+            state: crate::state::SandboxState::Started.into(),
             template: "seed",
             template_hash: Some("hash"),
             user: &owner,

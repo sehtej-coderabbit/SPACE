@@ -6,10 +6,10 @@ use super::*;
 /// a newer lifecycle label cannot be decoded by this binary.
 #[derive(Debug)]
 pub struct RawSandboxLifecycle {
-    /// The combined status label.
-    pub state: String,
-    /// The stored lifecycle label, without the cleanup `state` folds in.
+    /// The stored lifecycle label.
     pub lifecycle: String,
+    /// The label of the cleanup that owns the row, absent when none does.
+    pub cleanup_state: Option<String>,
     pub state_changed_at: String,
     /// The recorded cleanup completion, absent when none is recorded or its
     /// label can't be decoded. A consumer that must not mistake a failed stop
@@ -25,13 +25,9 @@ db_private_outside_tests! {
              FROM sandboxes WHERE id = ?1",
             [id],
             |row| {
-                let lifecycle: String = row.get(0)?;
                 Ok(RawSandboxLifecycle {
-                    state: SandboxState::label_from_columns(
-                        lifecycle.clone(),
-                        row.get::<_, Option<String>>(3)?.as_deref(),
-                    ),
-                    lifecycle,
+                    lifecycle: row.get(0)?,
+                    cleanup_state: row.get(3)?,
                     state_changed_at: timestamps::diagnostic_column(row, 1)?,
                     cleanup_completion: row
                         .get::<_, Option<String>>(2)
@@ -47,7 +43,7 @@ db_private_outside_tests! {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxLifecycleCount {
-    pub state: SandboxState,
+    pub state: SandboxStatus,
     pub runtime: Option<RuntimeKind>,
     pub runtime_version: Option<RuntimeVersion>,
     pub count: u64,
@@ -81,7 +77,10 @@ pub struct InsertSandboxParams<'a> {
     pub guest_image: pplx_space_common_core::types::guest_image::GuestImageContract,
     pub id: &'a str,
     pub uuid8: &'a SandboxRuntimeLabel,
-    pub state: SandboxState,
+    /// The inserted status. A cleanup-owned one is stored over its lifecycle,
+    /// which the cleanup triggers allow only over `stopping` until the
+    /// writer that records the cleanup's intent moves it.
+    pub state: SandboxStatus,
     pub template: &'a str,
     pub template_hash: Option<&'a str>,
     pub user: &'a SandboxOwner,
@@ -104,7 +103,7 @@ pub enum RestoreAdoptOrphanInsertError {
     #[error(transparent)]
     Sqlite(#[from] Error),
     #[error("restore sandbox row state must be restoring, got {state}")]
-    NonRestoringState { state: SandboxState },
+    NonRestoringState { state: SandboxStatus },
     #[error("existing sandbox row for id {id} is not a recoverable synthetic orphan")]
     ExistingRowNotSyntheticOrphan { id: String },
 }
@@ -114,7 +113,7 @@ pub enum InsertRecoveredSuspendedSandboxError {
     #[error(transparent)]
     Db(#[from] Error),
     #[error("recovered suspended sandbox insert must use suspended state, got {state}")]
-    NonSuspendedInsert { state: SandboxState },
+    NonSuspendedInsert { state: SandboxStatus },
     #[error("recovered suspended sandbox artifact pin updated {changed} rows instead of one")]
     ArtifactPinInvariant { changed: usize },
 }
@@ -152,7 +151,7 @@ db_private_outside_tests! {
         let rows = statement.query_map([], |row| {
             let state_label: String = row.get(0)?;
             let cleanup_label: Option<String> = row.get(4)?;
-            let state = SandboxState::from_columns(&state_label, cleanup_label.as_deref())
+            let state = SandboxStatus::from_columns(&state_label, cleanup_label.as_deref())
                 .ok_or_else(|| {
                     rusqlite::Error::FromSqlConversionFailure(
                         0,
@@ -191,8 +190,8 @@ db_private_outside_tests! {
             })
             .collect();
         counts.sort_by(|left, right| {
-            (left.state.as_str(), left.runtime, &left.runtime_version).cmp(&(
-                right.state.as_str(),
+            (left.state.legacy_label(), left.runtime, &left.runtime_version).cmp(&(
+                right.state.legacy_label(),
                 right.runtime,
                 &right.runtime_version,
             ))
@@ -224,15 +223,12 @@ db_private_outside_tests! {
             let state_label: String = row.get(0)?;
             let state = state_label
                 .parse::<SandboxState>()
-                .ok()
-                .filter(|state| state.cleanup_label().is_none())
-                .ok_or_else(|| unknown(0, &state_label))?;
+                .map_err(|_| unknown(0, &state_label))?;
             let cleanup_state = row
                 .get::<_, Option<String>>(1)?
                 .map(|label| {
-                    SandboxState::all()
-                        .into_iter()
-                        .find_map(|state| state.cleanup_label().filter(|known| *known == label))
+                    CleanupState::from_column(&label)
+                        .map(CleanupState::as_str)
                         .ok_or_else(|| unknown(1, &label))
                 })
                 .transpose()?;
@@ -248,15 +244,79 @@ db_private_outside_tests! {
 }
 
 db_private_outside_tests! {
+    /// The row's status label as episodes record it, which predates the
+    /// cleanup-state split: `cleanup_required`/`cleanup_failed` for a
+    /// cleanup-owned row, otherwise the lifecycle, and the stored text when
+    /// the columns name no status. `None` without a row.
     fn current_state_label(conn: &Connection, id: &str) -> Result<Option<String>> {
         conn.query_row(
             "SELECT state, cleanup_state FROM sandboxes WHERE id = ?1",
             params![id],
             |row| {
-                Ok(SandboxState::label_from_columns(
-                    row.get(0)?,
-                    row.get::<_, Option<String>>(1)?.as_deref(),
-                ))
+                let state: String = row.get(0)?;
+                let cleanup: Option<String> = row.get(1)?;
+                Ok(SandboxStatus::from_columns(&state, cleanup.as_deref())
+                    .map_or(state, |status| status.legacy_label().to_owned()))
+            },
+        )
+        .optional()
+    }
+}
+
+/// A row's status, or the stored `state` and `cleanup_state` text when the
+/// two name no status this binary knows.
+pub type ReadStatus = std::result::Result<SandboxStatus, String>;
+
+/// The row's status or its unknown text, `None` without a row.
+pub(crate) fn current_status_or_text(conn: &Connection, id: &str) -> Result<Option<ReadStatus>> {
+    Ok(conn
+        .query_row(
+            "SELECT state, cleanup_state FROM sandboxes WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+        .map(|(state, cleanup)| {
+            SandboxStatus::from_columns(&state, cleanup.as_deref()).ok_or(match cleanup {
+                None => state,
+                Some(cleanup) => format!("{state}, cleanup {cleanup}"),
+            })
+        }))
+}
+
+/// The row's status, `None` without a row or when its columns name no
+/// status this binary knows. A query failure is still an error.
+pub(crate) fn current_status_if_known(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<SandboxStatus>> {
+    Ok(conn
+        .query_row(
+            "SELECT state, cleanup_state FROM sandboxes WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+        .and_then(|(state, cleanup)| SandboxStatus::from_columns(&state, cleanup.as_deref())))
+}
+
+db_private_outside_tests! {
+    /// The row's status, `None` without a row. Columns that name no status
+    /// are a conversion error.
+    fn current_status(conn: &Connection, id: &str) -> Result<Option<SandboxStatus>> {
+        conn.query_row(
+            "SELECT state, cleanup_state FROM sandboxes WHERE id = ?1",
+            params![id],
+            |row| {
+                let state: String = row.get(0)?;
+                let cleanup: Option<String> = row.get(1)?;
+                SandboxStatus::from_columns(&state, cleanup.as_deref()).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        Type::Text,
+                        format!("unknown sandbox state '{state}', cleanup {cleanup:?}").into(),
+                    )
+                })
             },
         )
         .optional()
@@ -311,7 +371,7 @@ pub fn replace_retryable_remote_restore_source(
 
 fn initial_auto_lifecycle_state(
     policy: &AutoLifecyclePolicy,
-    state: SandboxState,
+    state: SandboxStatus,
 ) -> AutoLifecycleRuntimeState {
     if state == SandboxState::Started {
         return crate::auto_lifecycle::initial_runtime_state(
@@ -368,7 +428,7 @@ pub fn insert_sandbox(conn: &Connection, params: InsertSandboxParams<'_>) -> Res
         params![
             id,
             uuid8.as_str(),
-            state.inserted_lifecycle(),
+            state.lifecycle.as_str(),
             template,
             template_hash,
             user.as_str(),
@@ -393,7 +453,7 @@ pub fn insert_sandbox(conn: &Connection, params: InsertSandboxParams<'_>) -> Res
             // a durable request identity, but not an allocated predecessor.
             SandboxActivationAttemptId::new().to_string(),
             guest_image_json,
-            state.cleanup_label(),
+            state.cleanup.map(CleanupState::as_str),
         ],
     )?;
     Ok(())
@@ -1487,7 +1547,7 @@ db_private_outside_tests! {
                 row.get::<_, Option<String>>(4),
             ) {
                 (Ok(id), Ok(state), Ok(cleanup)) => {
-                    (id, SandboxState::label_from_columns(state, cleanup.as_deref()))
+                    (id, SandboxStatus::from_columns(&state, cleanup.as_deref()))
                 }
                 (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
                     tracing::warn!(
@@ -1498,10 +1558,10 @@ db_private_outside_tests! {
                     continue;
                 }
             };
-            let eligible = match state.parse::<SandboxState>() {
-                Ok(SandboxState::Started) => scan.runtime_exits,
-                Ok(SandboxState::Paused | SandboxState::Resuming | SandboxState::Checkpointing) => !scan.runtime_exits,
-                Ok(SandboxState::Suspending) => {
+            let eligible = match state.and_then(SandboxStatus::unowned) {
+                Some(SandboxState::Started) => scan.runtime_exits,
+                Some(SandboxState::Paused | SandboxState::Resuming | SandboxState::Checkpointing) => !scan.runtime_exits,
+                Some(SandboxState::Suspending) => {
                     !scan.runtime_exits && matches!(row.get_ref(3)?, rusqlite::types::ValueRef::Null)
                 }
                 _ => false,
@@ -1670,8 +1730,8 @@ pub fn delete_sandbox_if_inventory_witness_matches(
     // eviction, on-node Delete, or quarantine recovery) may release it;
     // eviction also refuses non-platform owners such as orphan rows.
     if matches!(
-        current.state,
-        SandboxState::Stopping | SandboxState::Deleting | SandboxState::Quarantined
+        current.state.unowned(),
+        Some(SandboxState::Stopping | SandboxState::Deleting | SandboxState::Quarantined)
     ) {
         return Ok(InventoryStaleRowMutation::Deferred(
             InventoryOwnershipReason::LifecycleOwned,

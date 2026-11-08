@@ -332,7 +332,7 @@ async fn create_intent_preserves_immutables_independently_of_pool_occupancy() {
                     guest_image: Default::default(),
                     id: &donor.to_string(),
                     uuid8: &SandboxRuntimeLabel::from_sandbox_id(donor),
-                    state: SandboxState::Paused,
+                    state: SandboxState::Paused.into(),
                     template: "seed",
                     template_hash: None,
                     user: &SandboxOwner::parse("user").unwrap(),

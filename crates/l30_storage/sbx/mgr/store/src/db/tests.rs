@@ -271,9 +271,9 @@ fn periodic_recovery_bounds_discovery_and_advances_past_retained_or_malformed_ro
 fn cleanup_intent_cannot_be_replaced_by_suspend_or_resident_completion() {
     let conn = test_conn();
     for cleanup_state in [
-        SandboxState::Deleting,
-        SandboxState::CleanupRequired,
-        SandboxState::CleanupFailed,
+        SandboxStatus::from(SandboxState::Deleting),
+        SandboxStatus::CLEANUP_REQUIRED,
+        SandboxStatus::CLEANUP_FAILED,
     ] {
         let id = SandboxId::new().to_string();
         insert_test_sandbox(
@@ -366,14 +366,14 @@ fn application_state_write_updates_only_state_changed_at() {
     assert_eq!(
         outcome,
         StateWriteOutcome::Applied {
-            from: SandboxState::Started
+            from: SandboxStatus::from(SandboxState::Started)
         }
     );
     assert_eq!(after_transition.0, after_transition.1);
     assert_eq!(
         retry_outcome,
         StateWriteOutcome::Applied {
-            from: SandboxState::Paused
+            from: SandboxStatus::from(SandboxState::Paused)
         }
     );
     assert_eq!(after_retry, after_transition.0);
@@ -416,7 +416,7 @@ fn every_allowed_state_transition_tracks_the_change_time() {
                 assert_eq!(
                     update_state_from_states(&conn, &sandbox_id, StateSet::of(&[from]), to)
                         .unwrap(),
-                    StateWriteOutcome::Applied { from },
+                    StateWriteOutcome::Applied { from: from.into() },
                     "{from} -> {to}"
                 );
             }
@@ -479,9 +479,9 @@ fn specialized_state_writers_track_the_change_time() {
 
     // Assert
     for (id, expected_state) in [
-        ("restore", SandboxState::Paused),
-        ("cleanup", SandboxState::CleanupRequired),
-        ("quarantine", SandboxState::Quarantined),
+        ("restore", SandboxStatus::from(SandboxState::Paused)),
+        ("cleanup", SandboxStatus::CLEANUP_REQUIRED),
+        ("quarantine", SandboxStatus::from(SandboxState::Quarantined)),
     ] {
         let (state, state_changed_at, updated_at): (String, String, String) = conn
             .query_row(
@@ -492,7 +492,7 @@ fn specialized_state_writers_track_the_change_time() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(state, expected_state.as_str(), "{id}");
+        assert_eq!(state, expected_state.legacy_label(), "{id}");
         assert_ne!(state_changed_at, "123", "{id}");
         assert_eq!(state_changed_at, updated_at, "{id}");
     }
@@ -1042,10 +1042,18 @@ fn access_idle_policy() -> AutoLifecyclePolicy {
 fn sandbox_lifecycle_counts_groups_durable_rows() {
     let conn = test_conn();
     for (id, uuid8, state) in [
-        ("started-1", "abc00001", SandboxState::Started),
-        ("started-2", "abc00002", SandboxState::Started),
-        ("cleanup-suspend", "abc00003", SandboxState::CleanupFailed),
-        ("cleanup-delete", "abc00004", SandboxState::CleanupFailed),
+        (
+            "started-1",
+            "abc00001",
+            SandboxStatus::from(SandboxState::Started),
+        ),
+        (
+            "started-2",
+            "abc00002",
+            SandboxStatus::from(SandboxState::Started),
+        ),
+        ("cleanup-suspend", "abc00003", SandboxStatus::CLEANUP_FAILED),
+        ("cleanup-delete", "abc00004", SandboxStatus::CLEANUP_FAILED),
     ] {
         insert_test_sandbox(&conn, TestSandboxInsert::new(id, uuid8, state));
     }
@@ -1064,13 +1072,13 @@ fn sandbox_lifecycle_counts_groups_durable_rows() {
         counts,
         vec![
             SandboxLifecycleCount {
-                state: SandboxState::CleanupFailed,
+                state: SandboxStatus::CLEANUP_FAILED,
                 runtime: Some(RuntimeKind::Firecracker),
                 runtime_version: None,
                 count: 2,
             },
             SandboxLifecycleCount {
-                state: SandboxState::Started,
+                state: SandboxStatus::from(SandboxState::Started),
                 runtime: Some(RuntimeKind::Firecracker),
                 runtime_version: None,
                 count: 2,
@@ -1200,33 +1208,33 @@ fn sandbox_lifecycle_counts_preserve_rows_across_runtime_versions_and_legacy_met
     assert_eq!(
         actual,
         vec![
-            (SandboxState::Started, None, None, 1),
+            (SandboxStatus::from(SandboxState::Started), None, None, 1),
             (
-                SandboxState::Started,
+                SandboxStatus::from(SandboxState::Started),
                 Some(RuntimeKind::Firecracker),
                 None,
                 5
             ),
             (
-                SandboxState::Started,
+                SandboxStatus::from(SandboxState::Started),
                 Some(RuntimeKind::Firecracker),
                 Some("1.15.1"),
                 2
             ),
             (
-                SandboxState::Started,
+                SandboxStatus::from(SandboxState::Started),
                 Some(RuntimeKind::Firecracker),
                 Some("1.17.0"),
                 1
             ),
             (
-                SandboxState::Started,
+                SandboxStatus::from(SandboxState::Started),
                 Some(RuntimeKind::CloudHypervisor),
                 Some("49.0"),
                 1
             ),
             (
-                SandboxState::Suspended,
+                SandboxStatus::from(SandboxState::Suspended),
                 Some(RuntimeKind::Firecracker),
                 Some("1.17.0"),
                 1
@@ -1253,12 +1261,24 @@ fn sandbox_status_counts_keep_each_lifecycle_and_cleanup_pair_apart() {
     // Plain, required and failed rows share `stopping`; plain and failed rows
     // share `deleting`.
     for (id, uuid8, state) in [
-        ("started", "abc00001", SandboxState::Started),
-        ("stopping", "abc00002", SandboxState::Stopping),
-        ("stop-required", "abc00003", SandboxState::CleanupRequired),
-        ("stop-failed", "abc00004", SandboxState::CleanupFailed),
-        ("deleting", "abc00005", SandboxState::Deleting),
-        ("delete-failed", "abc00006", SandboxState::CleanupFailed),
+        (
+            "started",
+            "abc00001",
+            SandboxStatus::from(SandboxState::Started),
+        ),
+        (
+            "stopping",
+            "abc00002",
+            SandboxStatus::from(SandboxState::Stopping),
+        ),
+        ("stop-required", "abc00003", SandboxStatus::CLEANUP_REQUIRED),
+        ("stop-failed", "abc00004", SandboxStatus::CLEANUP_FAILED),
+        (
+            "deleting",
+            "abc00005",
+            SandboxStatus::from(SandboxState::Deleting),
+        ),
+        ("delete-failed", "abc00006", SandboxStatus::CLEANUP_FAILED),
     ] {
         insert_test_sandbox(&conn, TestSandboxInsert::new(id, uuid8, state));
     }
@@ -1291,11 +1311,11 @@ fn sandbox_status_counts_keep_each_lifecycle_and_cleanup_pair_apart() {
     assert_eq!(
         legacy,
         vec![
-            (SandboxState::CleanupFailed, 2),
-            (SandboxState::CleanupRequired, 1),
-            (SandboxState::Deleting, 1),
-            (SandboxState::Started, 1),
-            (SandboxState::Stopping, 1),
+            (SandboxStatus::CLEANUP_FAILED, 2),
+            (SandboxStatus::CLEANUP_REQUIRED, 1),
+            (SandboxStatus::from(SandboxState::Deleting), 1),
+            (SandboxStatus::from(SandboxState::Started), 1),
+            (SandboxStatus::from(SandboxState::Stopping), 1),
         ]
     );
 }
@@ -1329,7 +1349,10 @@ fn suspend_publication_protects_live_and_retry_owned_suspend() {
         );
     }
 
-    for state in [SandboxState::CleanupRequired, SandboxState::CleanupFailed] {
+    for state in [
+        SandboxStatus::CLEANUP_REQUIRED,
+        SandboxStatus::CLEANUP_FAILED,
+    ] {
         assert_eq!(
             sandbox_erase_safety(state, Some(CleanupCompletion::MarkSuspended), None,),
             SandboxEraseSafety::SuspendPublicationPending,
@@ -1419,9 +1442,8 @@ fn recovered_suspended_insert_rejects_non_suspended_state_without_writing() {
 
     assert!(matches!(
         error,
-        InsertRecoveredSuspendedSandboxError::NonSuspendedInsert {
-            state: SandboxState::Quarantined
-        }
+        InsertRecoveredSuspendedSandboxError::NonSuspendedInsert { state }
+            if state == SandboxState::Quarantined
     ));
     assert!(get_sandbox(&conn, &sandbox_id_string).unwrap().is_none());
 }
@@ -1676,7 +1698,7 @@ fn restore_adopt_insert_binds_volume_encryption() {
             guest_image: Default::default(),
             id,
             uuid8,
-            state: SandboxState::Restoring,
+            state: SandboxState::Restoring.into(),
             template: "seed",
             template_hash: None,
             user,
@@ -1760,7 +1782,7 @@ fn restore_adoption_clears_obsolete_auto_lifecycle_delete_block() {
         guest_image: Default::default(),
         id: &sandbox_id_string,
         uuid8: &uuid8,
-        state: SandboxState::Restoring,
+        state: SandboxState::Restoring.into(),
         template: "seed",
         template_hash: None,
         user: &user,
@@ -1783,7 +1805,7 @@ fn restore_adoption_clears_obsolete_auto_lifecycle_delete_block() {
             guest_image: Default::default(),
             id: &sandbox_id_string,
             uuid8: &uuid8,
-            state: SandboxState::Created,
+            state: SandboxState::Created.into(),
             template: ORPHANED_SANDBOX_TEMPLATE,
             template_hash: None,
             user: &ORPHANED_SANDBOX_OWNER,
@@ -4326,7 +4348,7 @@ fn quarantine_cleanup_records_the_current_failure() {
 
     let row = get_sandbox(&conn, "failed").unwrap().unwrap();
     assert_eq!(row.state, SandboxState::Quarantined);
-    assert_eq!(episode.completion.target_state(), Some(row.state));
+    assert_eq!(episode.completion.target_state(), Some(row.state.lifecycle));
     assert_eq!(row.failure_reason.as_deref(), Some("retry failed"));
     assert!(cleanup_episode(&conn, "failed").unwrap().is_none());
     assert!(
@@ -4368,12 +4390,12 @@ fn repeated_cleanup_request_preserves_failure_and_missing_artifact_evidence() {
         .unwrap();
     assert_eq!(
         get_sandbox(&conn, "suspended").unwrap().unwrap().state,
-        SandboxState::CleanupRequired,
+        SandboxStatus::CLEANUP_REQUIRED,
         "a legacy completion must not finalize a requested cleanup episode"
     );
     assert_eq!(
         get_sandbox(&conn, "suspended").unwrap().unwrap().state,
-        SandboxState::CleanupRequired,
+        SandboxStatus::CLEANUP_REQUIRED,
         "a requested cleanup episode must retain lifecycle ownership"
     );
     assert!(
@@ -4392,7 +4414,7 @@ fn repeated_cleanup_request_preserves_failure_and_missing_artifact_evidence() {
     );
 
     let row = get_sandbox(&conn, "suspended").unwrap().unwrap();
-    assert_eq!(row.state, SandboxState::CleanupFailed);
+    assert_eq!(row.state, SandboxStatus::CLEANUP_FAILED);
     assert_eq!(row.failure_reason.as_deref(), Some("inner start failed"));
     assert_eq!(
         cleanup_episode(&conn, "suspended")
@@ -5077,7 +5099,7 @@ fn quarantine_recovery_stops_only_after_an_unbroken_run_of_plan_rejections() {
         get_sandbox(&conn, &sandbox_id.to_string())
             .unwrap()
             .map(|row| row.state),
-        Some(SandboxState::Quarantined),
+        Some(SandboxStatus::from(SandboxState::Quarantined)),
         "stopping recovery keeps the hold"
     );
     let scan = scan_quarantine_recovery_candidates(&conn).unwrap();
@@ -6636,7 +6658,7 @@ fn mark_cleanup_required_if_no_intent_preserves_foreign_intent() {
 
     assert!(wrote);
     let row = get_sandbox(&conn, "sandbox-1").unwrap().unwrap();
-    assert_eq!(row.state, SandboxState::CleanupRequired);
+    assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
     assert_eq!(
         row.cleanup_completion,
         Some(CleanupCompletion::MarkSuspended)
@@ -7033,7 +7055,7 @@ fn cleanup_recovery_owns_failure_clearance_not_stale_resident_completion() {
     assert_eq!(
         update_state_from(&conn, "sandbox-1", &edges::PAUSE_ROLLBACK).unwrap(),
         StateWriteOutcome::Refused {
-            found: SandboxState::CleanupFailed,
+            found: SandboxStatus::CLEANUP_FAILED,
             refusal: StateWriteRefusal::Guard(StateWriteGuard::CleanupOwned),
         }
     );
@@ -7065,7 +7087,7 @@ fn quarantined_state_is_not_exited_by_generic_failure_writers() {
     assert_eq!(
         update_state_from(&conn, "sandbox-1", &edges::PAUSE_ROLLBACK).unwrap(),
         StateWriteOutcome::Refused {
-            found: SandboxState::Quarantined,
+            found: SandboxStatus::from(SandboxState::Quarantined),
             refusal: StateWriteRefusal::Guard(StateWriteGuard::Quarantined),
         }
     );
@@ -7163,23 +7185,23 @@ fn net_gateway_lookup_matches_only_states_that_can_authorize_a_gateway() {
     let conn = test_conn();
 
     let states = [
-        SandboxState::Creating,
-        SandboxState::Created,
-        SandboxState::Starting,
-        SandboxState::Started,
-        SandboxState::Stopping,
-        SandboxState::Stopped,
-        SandboxState::Deleting,
-        SandboxState::Pausing,
-        SandboxState::Paused,
-        SandboxState::Resuming,
-        SandboxState::Checkpointing,
-        SandboxState::Suspending,
-        SandboxState::Suspended,
-        SandboxState::Restoring,
-        SandboxState::CleanupRequired,
-        SandboxState::CleanupFailed,
-        SandboxState::Failed,
+        SandboxStatus::from(SandboxState::Creating),
+        SandboxStatus::from(SandboxState::Created),
+        SandboxStatus::from(SandboxState::Starting),
+        SandboxStatus::from(SandboxState::Started),
+        SandboxStatus::from(SandboxState::Stopping),
+        SandboxStatus::from(SandboxState::Stopped),
+        SandboxStatus::from(SandboxState::Deleting),
+        SandboxStatus::from(SandboxState::Pausing),
+        SandboxStatus::from(SandboxState::Paused),
+        SandboxStatus::from(SandboxState::Resuming),
+        SandboxStatus::from(SandboxState::Checkpointing),
+        SandboxStatus::from(SandboxState::Suspending),
+        SandboxStatus::from(SandboxState::Suspended),
+        SandboxStatus::from(SandboxState::Restoring),
+        SandboxStatus::CLEANUP_REQUIRED,
+        SandboxStatus::CLEANUP_FAILED,
+        SandboxStatus::from(SandboxState::Failed),
     ];
 
     for (index, state) in states.into_iter().enumerate() {
@@ -7697,7 +7719,7 @@ fn startup_recovery_reconciles_interrupted_states_without_runtime_fields() {
                     completion
                 }
             );
-            assert_eq!(row.state, SandboxState::CleanupRequired);
+            assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
             assert_eq!(row.cleanup_keep_filesystem, Some(keep_filesystem));
             assert_eq!(row.cleanup_completion, Some(completion));
             assert!(row.failure_reason.as_deref().is_some_and(|reason| {
@@ -7824,7 +7846,7 @@ fn startup_recovery_defers_staging_failed_restore() {
         recovered,
         vec![StartupRecoveryRecord {
             id: id.clone(),
-            previous_state: SandboxState::Restoring,
+            previous_state: SandboxState::Restoring.into(),
             outcome: StartupRecoveryOutcome::Deferred,
         }]
     );
@@ -7876,7 +7898,7 @@ fn startup_recovery_uses_runtime_fields_to_choose_cleanup_destination() {
         );
 
         let row = get_sandbox(&conn, &id).unwrap().unwrap();
-        assert_eq!(row.state, SandboxState::CleanupRequired);
+        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
         assert_eq!(row.cleanup_keep_filesystem, Some(true));
         assert_eq!(row.cleanup_completion, Some(completion));
     }

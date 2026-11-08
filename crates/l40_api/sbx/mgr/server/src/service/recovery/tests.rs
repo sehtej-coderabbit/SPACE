@@ -74,7 +74,7 @@ pub(in crate::service) fn insert_suspended_test_sandbox(conn: &crate::db::Connec
             guest_image: Default::default(),
             id,
             uuid8: &uuid8,
-            state: SandboxState::Suspended,
+            state: SandboxState::Suspended.into(),
             template: "active-template",
             template_hash: Some("active-hash"),
             user: &user,
@@ -3470,7 +3470,7 @@ fn startup_requests_interrupted_activation_cleanup_with_the_activation_reason() 
         );
         assert_eq!(
             crate::db::get_sandbox(&db, &id).unwrap().unwrap().state,
-            SandboxState::CleanupRequired,
+            SandboxStatus::CLEANUP_REQUIRED,
             "{kind:?}"
         );
     }
@@ -3538,7 +3538,7 @@ fn startup_persists_the_inferred_cleanup_intent_of_an_interrupted_start() {
     let row = crate::db::get_sandbox(&db.lock().unwrap(), &id)
         .unwrap()
         .unwrap();
-    assert_eq!(row.state, SandboxState::CleanupRequired);
+    assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
     assert_eq!(row.cleanup_completion, Some(CleanupCompletion::MarkStopped));
     assert_eq!(row.cleanup_keep_filesystem, Some(true));
     assert_eq!(
@@ -3562,7 +3562,7 @@ fn requested_cleanup_discovery_yields_to_an_intent_recorded_after_listing() {
     super::super::tests::service_tests::insert_test_sandbox(
         &conn,
         &id,
-        SandboxState::CleanupFailed,
+        SandboxStatus::CLEANUP_FAILED,
     );
     conn.execute(
         "UPDATE sandboxes SET uid = 10000, slot = 0 WHERE id = ?1",
@@ -3585,7 +3585,7 @@ fn requested_cleanup_discovery_yields_to_an_intent_recorded_after_listing() {
     let row = crate::db::get_sandbox(&db.lock().unwrap(), &id)
         .unwrap()
         .unwrap();
-    assert_eq!(row.state, SandboxState::CleanupFailed);
+    assert_eq!(row.state, SandboxStatus::CLEANUP_FAILED);
     assert_eq!(row.cleanup_completion, Some(CleanupCompletion::MarkStopped));
     assert_eq!(row.cleanup_keep_filesystem, Some(true));
 }

@@ -94,14 +94,15 @@ const GUEST_HEALTH_CATEGORIES: [GuestHealthCategory; 3] = [
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum NetGatewayLifecycle {
-    Known(crate::state::SandboxState),
+    Known(crate::state::SandboxStatus),
     Unknown,
 }
 
 impl NetGatewayLifecycle {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Known(state) => state.as_str(),
+            // The tag predates the cleanup-state split.
+            Self::Known(state) => state.legacy_label(),
             Self::Unknown => "unknown",
         }
     }
@@ -1964,7 +1965,11 @@ fn composed_health_gauge_counts(
 ) -> HashMap<(&'static str, ComposedHealthStatus), usize> {
     let mut counts = HashMap::<(&'static str, ComposedHealthStatus), usize>::new();
     for row in rows {
-        if !COMPOSED_HEALTH_LIFECYCLES.contains(&row.state) {
+        if !row
+            .state
+            .unowned()
+            .is_some_and(|state| COMPOSED_HEALTH_LIFECYCLES.contains(&state))
+        {
             continue;
         }
         let status = state
@@ -1972,7 +1977,9 @@ fn composed_health_gauge_counts(
             .map_or(ComposedHealthStatus::Unspecified, |snapshot| {
                 snapshot.composed
             });
-        *counts.entry((row.state.as_str(), status)).or_default() += 1;
+        *counts
+            .entry((row.state.lifecycle.as_str(), status))
+            .or_default() += 1;
     }
     counts
 }
@@ -2184,7 +2191,7 @@ async fn emit_net_gateway_route_verification_gauges(
 fn sandbox_states_for_ids(
     db: &crate::db::SharedConnection,
     sandbox_ids: &[String],
-) -> Option<HashMap<String, crate::state::SandboxState>> {
+) -> Option<HashMap<String, crate::state::SandboxStatus>> {
     let db = match db.lock() {
         Ok(db) => db,
         Err(error) => {
@@ -2192,26 +2199,22 @@ fn sandbox_states_for_ids(
             return None;
         }
     };
-    let labels = match crate::db::read::sandbox_views(&db, sandbox_ids).state_labels() {
-        Ok(labels) => labels,
+    let statuses = match crate::db::read::sandbox_views(&db, sandbox_ids).statuses() {
+        Ok(statuses) => statuses,
         Err(error) => {
             tracing::warn!(%error, "failed to prepare watchdog probe-state lookup");
             return None;
         }
     };
     let mut states = HashMap::with_capacity(sandbox_ids.len());
-    for (sandbox_id, label) in labels {
-        let state = match label {
+    for (sandbox_id, status) in statuses {
+        let state = match status {
             Ok(Some(state)) => state,
             Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(sandbox_id, %error, "failed to load watchdog probe state");
                 continue;
             }
-        };
-        let Ok(state) = state.parse::<crate::state::SandboxState>() else {
-            tracing::warn!(sandbox_id, state, "watchdog found an unknown sandbox state");
-            continue;
         };
         states.insert(sandbox_id.clone(), state);
     }
@@ -2233,7 +2236,9 @@ fn guest_health_gauge_counts(
             .map(|snapshot| snapshot.guest)
             .unwrap_or_else(|| probe_missing_health(&row.id));
         let category = classify_guest_health(probe);
-        *counts.entry((row.state.as_str(), category)).or_insert(0) += 1;
+        *counts
+            .entry((row.state.lifecycle.as_str(), category))
+            .or_insert(0) += 1;
     }
     counts
 }
@@ -2257,8 +2262,10 @@ fn guest_health_gauge_values(
     values
 }
 
-fn lifecycle_has_guest_health_metric(state: crate::state::SandboxState) -> bool {
-    GUEST_HEALTH_LIFECYCLES.contains(&state)
+fn lifecycle_has_guest_health_metric(state: crate::state::SandboxStatus) -> bool {
+    state
+        .unowned()
+        .is_some_and(|state| GUEST_HEALTH_LIFECYCLES.contains(&state))
 }
 
 fn guest_health_probe_from_processes(sandbox_id: &str) -> GuestHealthProbe {
@@ -2517,7 +2524,12 @@ async fn composed_health_loop(
 
         let mut pending = tokio::task::JoinSet::new();
         for (sandbox_id, lifecycle_epoch, info) in due_sidecars {
-            let lifecycle = sandbox_states.get(&sandbox_id).copied();
+            // Only an unowned `Started`, `Paused` or `Quarantined` row is
+            // probed, so a cleanup-owned one reads as no lifecycle.
+            let lifecycle = sandbox_states
+                .get(&sandbox_id)
+                .copied()
+                .and_then(crate::state::SandboxStatus::unowned);
             if !health_probe_lifecycle_is_eligible(lifecycle) {
                 continue;
             }

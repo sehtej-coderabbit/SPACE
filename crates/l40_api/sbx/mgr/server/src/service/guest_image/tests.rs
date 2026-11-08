@@ -28,7 +28,7 @@ fn insert_firmware_sandbox(
         crate::db::InsertSandboxParams {
             id,
             uuid8: &SandboxRuntimeLabel::parse("01234567").unwrap(),
-            state,
+            state: state.into(),
             template: "firmware-test",
             template_hash: None,
             user: &SandboxOwner::parse("test-owner").unwrap(),

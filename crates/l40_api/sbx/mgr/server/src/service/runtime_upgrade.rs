@@ -38,7 +38,7 @@ use crate::db::{
     RuntimeUpgradeTargetState, SandboxRow,
 };
 use crate::proto::{StartRequest, StartResponse};
-use crate::state::SandboxState;
+use crate::state::{SandboxState, SandboxStatus};
 
 mod node_effects;
 mod rpc;
@@ -246,19 +246,23 @@ enum BootActivity {
     Done,
     /// Between states on the boot's execution, such as checkpointing, pausing
     /// or quarantined; it may come back running, so the stop waits for a retry.
-    Changing(SandboxState),
+    Changing(SandboxStatus),
 }
 
 fn boot_activity(
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     current: Option<SandboxActivationAttemptId>,
     boot: SandboxActivationAttemptId,
 ) -> BootActivity {
+    let state = state.into();
     // Quarantine completes a wait but can recover to started on the same
     // execution.
     if current != Some(boot) || (state.completes_wait() && state != SandboxState::Quarantined) {
         BootActivity::Done
-    } else if matches!(state, SandboxState::Started | SandboxState::Paused) {
+    } else if matches!(
+        state.unowned(),
+        Some(SandboxState::Started | SandboxState::Paused)
+    ) {
         BootActivity::Running
     } else {
         BootActivity::Changing(state)
@@ -269,7 +273,7 @@ fn boot_activity(
 /// another one runs, the upgrade has nothing to stop (`Ok(false)`). Otherwise
 /// the boot's own execution is still the upgrade's to stop on a retry.
 fn moved_on_or_retry(
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     current: Option<SandboxActivationAttemptId>,
     execution: SandboxActivationAttemptId,
     refusal: &Status,
@@ -479,8 +483,8 @@ impl<E: RuntimeUpgradeEffects> RuntimeUpgrader<E> {
         }
         // What the sandbox ran under last: its checkpoint's producer when
         // suspended, otherwise its saved consumer or, unbound, its disk's.
-        let source = match sandbox.state {
-            SandboxState::Suspended => disk.checkpoint_execution.as_ref(),
+        let source = match sandbox.state.unowned() {
+            Some(SandboxState::Suspended) => disk.checkpoint_execution.as_ref(),
             _ => sandbox.execution_metadata.as_ref(),
         }
         .unwrap_or(&disk.execution);

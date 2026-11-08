@@ -3,6 +3,7 @@
 //! own case, every refusal starting from a row the write would otherwise change.
 
 use crate::db::Connection;
+use crate::state::SandboxStatus;
 use pplx_space_common_core::types::{
     LocalArtifactId, RuntimeKind, SandboxCleanupEpisodeId, SandboxId, SandboxQuarantineNextAction,
     SandboxQuarantineReasonCode, SandboxQuarantineSource, TransferScopeId,
@@ -685,17 +686,19 @@ fn orphan_restore_adoption_rewrites_only_a_synthetic_orphan() {
     let mut perturbations: Vec<(String, String)> = SandboxState::all()
         .into_iter()
         .filter(|state| !matches!(state, SandboxState::Quarantined | SandboxState::Restoring))
+        .map(SandboxStatus::from)
+        .chain([SandboxStatus::CLEANUP_REQUIRED, SandboxStatus::CLEANUP_FAILED])
         .map(|state| {
             // A cleanup-owned status is stored as its lifecycle plus the
             // cleanup over it.
             let cleanup_state = state
-                .cleanup_label()
-                .map_or_else(|| "NULL".to_owned(), |label| format!("'{label}'"));
+                .cleanup
+                .map_or_else(|| "NULL".to_owned(), |cleanup| format!("'{}'", cleanup.as_str()));
             (
                 format!("orphan in {state}"),
                 format!(
                     "UPDATE sandboxes SET state = '{}', cleanup_state = {cleanup_state} WHERE id = ?1",
-                    state.inserted_lifecycle()
+                    state.lifecycle.as_str()
                 ),
             )
         })

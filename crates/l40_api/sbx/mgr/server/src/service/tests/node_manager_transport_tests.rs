@@ -269,7 +269,7 @@ async fn unsealed_encrypted_capture_survives_restart_and_publishes_once_sealed()
         ["ReleaseEncryptedVolume", "ReleaseEncryptedVolume"]
     );
     let row = service.lookup_sandbox(&id).unwrap();
-    assert_eq!(row.state, SandboxState::CleanupRequired);
+    assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
     assert_eq!(row.current_local_artifact_id, Some(capture));
     let published = publication::canonical_suspend_snapshot_dir(&cache.path().join(&id));
     assert!(
@@ -342,7 +342,7 @@ async fn complete_staged_capture_publishes_past_an_older_unsealed_record() {
         "a complete capture needs no seal"
     );
     let row = service.lookup_sandbox(&id).unwrap();
-    assert_eq!(row.state, SandboxState::CleanupRequired);
+    assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
     assert_eq!(row.current_local_artifact_id, Some(newer));
 }
 

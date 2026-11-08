@@ -22,7 +22,7 @@ fn armed_clone_with_image(
             guest_image,
             id: &id.to_string(),
             uuid8: &SandboxRuntimeLabel::from_sandbox_id(id),
-            state: SandboxState::Creating,
+            state: SandboxState::Creating.into(),
             template: "seed",
             template_hash: Some("sha256:test"),
             user: &pplx_space_common_core::types::SandboxOwner::parse("deploy").unwrap(),
@@ -316,7 +316,7 @@ async fn pool_clone_publication_and_disposal_are_exclusive() {
                 crate::db::CleanupEpisodeRequestOutcome::Superseded
             );
         } else {
-            assert_eq!(row.state, SandboxState::CleanupRequired, "{outcome}");
+            assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED, "{outcome}");
             assert!(
                 !row.failure_reason
                     .as_deref()
@@ -396,7 +396,7 @@ async fn pool_clone_restart_preserves_disposal_ownership() {
             .unwrap()
             .unwrap()
             .state,
-        SandboxState::CleanupRequired
+        SandboxStatus::CLEANUP_REQUIRED
     );
     assert!(!crate::db::complete_pool_clone(&db, &id.to_string(), cleanup_id).unwrap());
     assert_eq!(
@@ -489,7 +489,7 @@ async fn pool_clone_restart_preserves_disposal_ownership() {
 async fn pool_clone_requires_a_stable_donor_and_pins_its_template_revision() {
     let (service, id, _) = armed_clone();
     let mut row = service.lookup_sandbox(&id.to_string()).unwrap();
-    row.state = SandboxState::Paused;
+    row.state = SandboxState::Paused.into();
     for case in [
         "valid",
         "running",
@@ -504,7 +504,7 @@ async fn pool_clone_requires_a_stable_donor_and_pins_its_template_revision() {
             "seed"
         };
         match case {
-            "running" => donor.state = SandboxState::Started,
+            "running" => donor.state = SandboxState::Started.into(),
             "encrypted" => donor.volume_encryption = true,
             "missing_hash" => donor.template_hash = None,
             _ => {}

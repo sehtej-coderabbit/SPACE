@@ -57,7 +57,7 @@ fn begin(
     let row = get_sandbox(conn, sandbox_id).unwrap();
     let observed = row.as_ref().map_or(
         ObservedSandbox {
-            state: SandboxState::Stopped,
+            state: SandboxState::Stopped.into(),
             current_local_artifact_id: None,
             execution: None,
         },
@@ -174,7 +174,7 @@ fn begin_refuses_everything_that_already_owns_the_sandbox() {
         let id = sandbox(&conn, state, &envs.source);
         assert_eq!(
             begin(&conn, operation(), &id, envs.target_reference, true),
-            BeginRuntimeUpgrade::UnsupportedState(state),
+            BeginRuntimeUpgrade::UnsupportedState(state.into()),
             "{state}"
         );
         assert_eq!(unsettled_runtime_upgrades(&conn).unwrap(), vec![]);

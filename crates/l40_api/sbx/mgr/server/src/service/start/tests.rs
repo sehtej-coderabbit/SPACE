@@ -4,6 +4,7 @@ use super::*;
 use crate::db::CleanupCompletion;
 use crate::service::recovery::tests::{insert_suspended_test_sandbox, recovery_test_service};
 use crate::service::suspend_snapshot_publication::LOCAL_SNAPSHOT_DIR;
+use crate::state::SandboxStatus;
 use pplx_space_common_core::types::ExecutionGeneration;
 
 // A cold boot and a snapshot load give a sandbox the same rootfs limiter,
@@ -679,7 +680,7 @@ async fn restore_releases_artifact_lock_while_waiting_for_cleanup_completion() {
     let conn = crate::db::test_conn();
     let id = SandboxId::new().to_string();
     let cleanup_id = SandboxCleanupEpisodeId::new();
-    insert_test_sandbox(&conn, &id, SandboxState::CleanupRequired);
+    insert_test_sandbox(&conn, &id, SandboxStatus::CLEANUP_REQUIRED);
     crate::db::set_cleanup_intent(&conn, &id, true, CleanupCompletion::MarkSuspended).unwrap();
     conn.execute("INSERT INTO sandbox_cleanup_episodes
         (sandbox_id, cleanup_id, completion, keep_filesystem, phase, activation_state, created_at, requested_at, quarantine_reason_code)

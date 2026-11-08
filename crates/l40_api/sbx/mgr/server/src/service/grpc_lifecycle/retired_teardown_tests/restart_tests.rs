@@ -2,6 +2,7 @@
 //! backup leaves the row to that teardown.
 
 use super::*;
+use crate::state::SandboxStatus;
 
 /// The teardown still owns a `suspending` row whose capture it staged and
 /// whose runtime is live: it backs the capture up, then finalizes the runtime.
@@ -112,7 +113,7 @@ fn startup_cleanup_marks_a_teardown_owned_row_suspended_once_its_runtime_is_gone
     assert_eq!(
         (row.state, row.cleanup_completion),
         (
-            SandboxState::CleanupRequired,
+            SandboxStatus::CLEANUP_REQUIRED,
             Some(crate::db::CleanupCompletion::MarkSuspended)
         ),
         "the intent is persisted, so the periodic reconciler retries a cleanup that doesn't finish"

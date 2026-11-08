@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use super::database_rows;
 
 use crate::db::Connection;
+use crate::state::SandboxStatus;
 use pplx_space_common_core::types::{
     ArtifactKind, ArtifactOrigin, AutoLifecyclePolicy, ExactStorageUri, ExecutionGeneration,
     LocalArtifactId, SandboxCleanupEpisodeId, SandboxId, SandboxOwner, SandboxQuarantineNextAction,
@@ -92,7 +93,7 @@ fn with_insert_params<T>(
         guest_image: Default::default(),
         id: &id,
         uuid8: &uuid8,
-        state,
+        state: state.into(),
         template: "seed",
         template_hash: Some("hash"),
         user: &user,
@@ -353,7 +354,7 @@ fn prepared_clone_disposal_rearms_only_its_own_quarantined_pool_clone_episode() 
         record_cleanup_episode_failure(&conn, &exhausted, exhausted_cleanup, "clone delete failed")
             .unwrap()
     );
-    assert_eq!(row(&conn, &exhausted).state, SandboxState::CleanupFailed);
+    assert_eq!(row(&conn, &exhausted).state, SandboxStatus::CLEANUP_FAILED);
     let before = database_rows(&conn);
     assert!(!rearm_prepared_clone_disposal(&conn, &exhausted, exhausted_cleanup).unwrap());
     assert_unchanged(&conn, &before, "requested disposal is not quarantined");
@@ -400,7 +401,7 @@ fn prepared_clone_disposal_rearms_only_its_own_quarantined_pool_clone_episode() 
             "{case}"
         );
         let rearmed = row(&conn, id);
-        assert_eq!(rearmed.state, SandboxState::CleanupRequired, "{case}");
+        assert_eq!(rearmed.state, SandboxStatus::CLEANUP_REQUIRED, "{case}");
         assert_eq!(
             rearmed.cleanup_completion,
             Some(CleanupCompletion::DeletePoolClone),
@@ -697,7 +698,7 @@ fn suspended_cleanup_pin_requires_a_suspending_row_and_a_refusal_keeps_prior_art
     let artifact = LocalArtifactId::new();
     pin_suspended_artifact_for_cleanup(&conn, &id, artifact, &snapshot_path(&id)).unwrap();
     let pinned = row(&conn, &id);
-    assert_eq!(pinned.state, SandboxState::CleanupRequired);
+    assert_eq!(pinned.state, SandboxStatus::CLEANUP_REQUIRED);
     assert_eq!(pinned.current_local_artifact_id, Some(artifact));
     assert_eq!(pinned.current_local_artifact_kind, Some(ArtifactKind::Full));
     assert_eq!(
@@ -817,13 +818,13 @@ fn restored_disk_as_new_publication_requires_a_restoring_row() {
 #[test]
 fn stopped_artifact_publication_accepts_only_stop_completions_and_unpinned_stopped_rows() {
     let conn = test_conn();
-    let cleanup = |state: SandboxState, completion: CleanupCompletion| {
+    let cleanup = |state: SandboxStatus, completion: CleanupCompletion| {
         let id = insert_row(&conn, SandboxState::Stopping);
         match state {
-            SandboxState::CleanupRequired => {
+            SandboxStatus::CLEANUP_REQUIRED => {
                 mark_cleanup_required(&conn, &id, true, completion, "stop cleanup").unwrap();
             }
-            SandboxState::CleanupFailed => {
+            SandboxStatus::CLEANUP_FAILED => {
                 assert!(mark_cleanup_failed(&conn, &id, true, completion, "stop cleanup").unwrap());
             }
             _ => unreachable!(),
@@ -841,13 +842,16 @@ fn stopped_artifact_publication_accepts_only_stop_completions_and_unpinned_stopp
         (
             "cleanup_required to stopped",
             cleanup(
-                SandboxState::CleanupRequired,
+                SandboxStatus::CLEANUP_REQUIRED,
                 CleanupCompletion::MarkStopped,
             ),
         ),
         (
             "cleanup_failed to stopped",
-            cleanup(SandboxState::CleanupFailed, CleanupCompletion::MarkStopped),
+            cleanup(
+                SandboxStatus::CLEANUP_FAILED,
+                CleanupCompletion::MarkStopped,
+            ),
         ),
         ("unpinned stopped", insert_row(&conn, SandboxState::Stopped)),
     ];
@@ -874,31 +878,29 @@ fn stopped_artifact_publication_accepts_only_stop_completions_and_unpinned_stopp
         assert_eq!(published.cleanup_keep_filesystem, None, "{case}");
     }
 
-    // `cleanup_required` and `cleanup_failed` are refused through the
-    // completions below; a bare row in either state is not a production shape.
-    let swept = states_except(&[
-        SandboxState::Stopping,
-        SandboxState::Stopped,
-        SandboxState::CleanupRequired,
-        SandboxState::CleanupFailed,
-    ])
-    .map(|state| {
-        let id = insert_row(&conn, state);
-        set_runtime_pid(&conn, &id);
-        (state.as_str(), id)
-    })
-    .collect::<Vec<_>>();
+    // A required and a failed cleanup are refused through the completions
+    // below; a bare row a cleanup owns is not a production shape.
+    let swept = states_except(&[SandboxState::Stopping, SandboxState::Stopped])
+        .map(|state| {
+            let id = insert_row(&conn, state);
+            set_runtime_pid(&conn, &id);
+            (state.as_str(), id)
+        })
+        .collect::<Vec<_>>();
     let (suspended, _) = insert_suspended_with_artifact(&conn);
     let refused = swept.into_iter().chain([
         ("suspended with its artifact", suspended),
         (
             "cleanup_required to delete",
-            cleanup(SandboxState::CleanupRequired, CleanupCompletion::DeleteRow),
+            cleanup(
+                SandboxStatus::CLEANUP_REQUIRED,
+                CleanupCompletion::DeleteRow,
+            ),
         ),
         (
             "cleanup_failed to suspended",
             cleanup(
-                SandboxState::CleanupFailed,
+                SandboxStatus::CLEANUP_FAILED,
                 CleanupCompletion::MarkSuspended,
             ),
         ),

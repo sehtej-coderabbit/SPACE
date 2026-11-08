@@ -55,7 +55,7 @@ use super::{
 use crate::{
     db::CleanupCompletion,
     proto::{StartRequest, StartResponse},
-    state::{SandboxState, SandboxStatusEventDetails},
+    state::{SandboxState, SandboxStatus, SandboxStatusEventDetails},
 };
 use pplx_space_common_core::types::{
     SandboxCleanupEpisodeId, SandboxId, SandboxOwnerKind, SandboxQuarantineReasonCode,
@@ -253,13 +253,16 @@ fn verify_stopped_materialization(
 
 fn interrupted_restore_action(
     checkpoint: &str,
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     cleanup_completion: Option<crate::db::CleanupCompletion>,
     restore_artifact_as_new: bool,
 ) -> InterruptedRestoreAction {
+    let state = state.into();
     let suspend_restore = checkpoint == SUSPEND_CHECKPOINT
-        && (matches!(state, SandboxState::Suspended | SandboxState::Restoring)
-            || cleanup_completion == Some(crate::db::CleanupCompletion::MarkSuspended));
+        && (matches!(
+            state.unowned(),
+            Some(SandboxState::Suspended | SandboxState::Restoring)
+        ) || cleanup_completion == Some(crate::db::CleanupCompletion::MarkSuspended));
     if restore_artifact_as_new && state == SandboxState::Restoring {
         InterruptedRestoreAction::RematerializeArtifact
     } else if suspend_restore {
@@ -976,10 +979,7 @@ impl SandboxManagerService {
         &self,
         sandbox: &crate::db::SandboxRow,
     ) -> Result<Option<SandboxCleanupEpisodeId>, Status> {
-        if !matches!(
-            sandbox.state,
-            SandboxState::CleanupRequired | SandboxState::CleanupFailed
-        ) {
+        if !sandbox.state.is_cleanup_owned() {
             return Ok(None);
         }
         let db = self
@@ -1483,10 +1483,7 @@ impl SandboxManagerService {
         }
 
         if sandbox.cleanup_completion == Some(crate::db::CleanupCompletion::MarkSuspended) {
-            if !matches!(
-                sandbox.state,
-                SandboxState::CleanupRequired | SandboxState::CleanupFailed
-            ) {
+            if !sandbox.state.is_cleanup_owned() {
                 let cleanup_reason = sandbox.failure_reason.clone().unwrap_or_else(|| {
                     "restore requires completion of pending runtime retirement".to_string()
                 });
@@ -2223,7 +2220,7 @@ impl SandboxManagerService {
             crate::db::begin_activation_with_route_evidence(
                 &db,
                 id,
-                sandbox.state,
+                sandbox.state.lifecycle,
                 crate::db::ActivationKind::ColdStart,
                 start_ctx.execution_generation,
                 start_ctx.space_api_route_identity.activation_attempt_id,
@@ -2400,19 +2397,23 @@ impl SandboxManagerService {
                 })
                 .await;
             let db = self.db_conn()?;
-            let restored_state =
-                match crate::db::rollback_starting_episode(&db, id, sandbox.state, cleanup_id) {
-                    Ok(restored_state) => restored_state,
-                    Err(error) => {
-                        tracing::warn!(
-                            sandbox_id = %id,
-                            state = ?sandbox.state,
-                            %error,
-                            "failed to restore sandbox state after invalid sandbox uid"
-                        );
-                        false
-                    }
-                };
+            let restored_state = match crate::db::rollback_starting_episode(
+                &db,
+                id,
+                sandbox.state.lifecycle,
+                cleanup_id,
+            ) {
+                Ok(restored_state) => restored_state,
+                Err(error) => {
+                    tracing::warn!(
+                        sandbox_id = %id,
+                        state = ?sandbox.state,
+                        %error,
+                        "failed to restore sandbox state after invalid sandbox uid"
+                    );
+                    false
+                }
+            };
             if release_result.is_ok() && restored_state {
                 activation_cleanup.complete_handled_failure();
             } else {
