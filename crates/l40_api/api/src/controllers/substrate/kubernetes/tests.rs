@@ -23,9 +23,11 @@ pub(crate) use kubernetes_tests::{
     substrate_with_store_client_proxy_port_pods_and_nodes, substrate_with_unreachable_store,
 };
 
+mod leftover_upgrade_pod;
 mod native_pod_failover;
 mod runtime_upgrade_dispatch;
 mod runtime_upgrade_fixture;
+pub(super) mod stopped_runtime_upgrade;
 mod substrate_scope;
 
 mod kubernetes_tests {
@@ -743,10 +745,10 @@ mod kubernetes_tests {
             nodes,
         );
 
-        assert!(substrate.started_recovery_source_node_available("healthy"));
+        assert!(substrate.local_source_node_available("healthy"));
         for unavailable in ["blocked", "wrong-selector", "full"] {
             assert!(
-                !substrate.started_recovery_source_node_available(unavailable),
+                !substrate.local_source_node_available(unavailable),
                 "{unavailable} must not receive a direct nodeName restore"
             );
         }
