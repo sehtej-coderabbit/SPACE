@@ -301,7 +301,7 @@ fn template_base_snapshot_writes_leave_a_stop_that_completed_during_capture_stop
 /// is visible in every column it touches.
 #[test]
 fn template_base_snapshot_writes_return_only_a_checkpointing_row_to_paused() {
-    for state in SandboxStatus::sweep() {
+    for state in SandboxStatus::all() {
         let expected_error = match state.unowned() {
             Some(SandboxState::Checkpointing) => None,
             // The generic guards: a stopping or cleanup row is never revived,
@@ -338,6 +338,10 @@ fn template_base_snapshot_writes_return_only_a_checkpointing_row_to_paused() {
             let id = SandboxId::new().to_string();
             crate::service::tests::service_tests::insert_test_sandbox_with_runtime(
                 &conn, &id, state,
+            );
+            assert_eq!(
+                crate::db::get_sandbox(&conn, &id).unwrap().unwrap().state,
+                state
             );
             crate::db::test_fixtures::state_write_fixtures::decorate(
                 &conn,

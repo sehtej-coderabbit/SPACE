@@ -7213,13 +7213,14 @@ pub(crate) mod service_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn wait_completes_for_quarantine_without_a_caller_deadline() {
+    async fn wait_completes_only_for_terminal_statuses_without_a_caller_deadline() {
         for state in [
             SandboxStatus::from(SandboxState::Quarantined),
             SandboxStatus::from(SandboxState::Stopped),
             SandboxStatus::from(SandboxState::Suspended),
             SandboxStatus::from(SandboxState::Failed),
             SandboxStatus::CLEANUP_FAILED,
+            SandboxStatus::CLEANUP_REQUIRED,
         ] {
             let conn = crate::db::test_conn();
             let id = SandboxId::new().to_string();
@@ -7232,20 +7233,27 @@ pub(crate) mod service_tests {
                     timeout_secs: None,
                 })),
             )
-            .await
-            .expect("Wait must complete without requiring an API timeout")
-            .unwrap()
-            .into_inner();
-            assert_eq!(
-                response.observed_lifecycle().unwrap(),
-                match state.cleanup {
-                    Some(CleanupState::Failed) =>
-                        crate::proto::SandboxLifecycleState::CleanupFailed,
-                    Some(CleanupState::Required) =>
-                        unreachable!("required cleanup does not complete Wait"),
-                    None => crate::proto::SandboxLifecycleState::from(state.lifecycle),
+            .await;
+            let expected = match state.cleanup {
+                Some(CleanupState::Required) => None,
+                Some(CleanupState::Failed) => {
+                    Some(crate::proto::SandboxLifecycleState::CleanupFailed)
                 }
-            );
+                None => Some(crate::proto::SandboxLifecycleState::from(state.lifecycle)),
+            };
+            if let Some(expected) = expected {
+                assert_eq!(
+                    response
+                        .expect("Wait must complete without requiring an API timeout")
+                        .unwrap()
+                        .into_inner()
+                        .observed_lifecycle()
+                        .unwrap(),
+                    expected,
+                );
+            } else {
+                assert!(response.is_err(), "required cleanup must keep Wait pending");
+            }
         }
     }
 
@@ -7386,6 +7394,31 @@ pub(crate) mod service_tests {
         )
         .unwrap();
         if state != SandboxState::Started {
+            if state.is_cleanup_owned() {
+                let completion = match state.lifecycle {
+                    SandboxState::Deleting => Some(CleanupCompletion::DeleteRow),
+                    SandboxState::Suspending => {
+                        crate::db::test_fixtures::state_write_fixtures::write_status(
+                            conn,
+                            id,
+                            SandboxState::Suspending,
+                        );
+                        Some(CleanupCompletion::MarkSuspended)
+                    }
+                    _ => None,
+                };
+                if let Some(completion) = completion {
+                    assert!(
+                        crate::db::set_cleanup_intent(
+                            conn,
+                            id,
+                            completion == CleanupCompletion::MarkSuspended,
+                            completion,
+                        )
+                        .unwrap()
+                    );
+                }
+            }
             crate::db::test_fixtures::state_write_fixtures::write_status(conn, id, state);
         }
     }
