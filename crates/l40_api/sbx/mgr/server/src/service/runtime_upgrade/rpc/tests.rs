@@ -1529,12 +1529,26 @@ async fn an_activation_meeting_a_moving_sandbox_is_retryable() {
 /// still driving, is refused as retryable, not as a sandbox that runs.
 #[tokio::test]
 async fn a_stopped_target_meeting_a_moving_sandbox_is_retryable() {
-    for state in [
-        SandboxState::Stopping.into(),
-        SandboxStatus::CLEANUP_REQUIRED,
-        SandboxStatus::CLEANUP_FAILED,
+    for (mut state, delete_row) in [
+        (SandboxState::Stopping.into(), false),
+        (SandboxStatus::CLEANUP_REQUIRED, false),
+        (SandboxStatus::CLEANUP_FAILED, false),
+        (SandboxStatus::CLEANUP_REQUIRED, true),
+        (SandboxStatus::CLEANUP_FAILED, true),
     ] {
         let f = fixture(state, false, FakeNodeManager::default());
+        if delete_row {
+            assert!(
+                crate::db::set_cleanup_intent(
+                    &f.service.db.lock().unwrap(),
+                    &f.sandbox_id,
+                    false,
+                    crate::db::CleanupCompletion::DeleteRow,
+                )
+                .unwrap()
+            );
+            state.lifecycle = SandboxState::Deleting;
+        }
         let target = certified_target(&f.source);
         f.put_on(&target);
 
