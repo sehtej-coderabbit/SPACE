@@ -1239,34 +1239,40 @@ recorded.
 
 ## Worker-local lifecycle populations
 
-Sandbox-manager emits `sandbox.worker.lifecycle.count` every 60 seconds from
-its durable SQLite rows, grouped by `state`, `runtime`, and `runtime_version`.
-Runtime identity comes from the sandbox's recorded execution metadata, not the
-node's default, installed-binary inventory, or a mutable template tag. Runtime
-aliases are normalized to full names such as `firecracker` and
-`cloud-hypervisor`. Legacy rows without a valid recorded identity keep their
-known runtime kind and use `runtime_version:unknown`; an unrecognized kind is
-also `unknown`, never an assumed legacy version.
+Sandbox-manager emits `sandbox.worker.lifecycle.status_count` every 60 seconds
+from its durable SQLite rows, grouped by `state`, `cleanup_state`, `runtime`,
+and `runtime_version`. `state` is always a lifecycle state. `cleanup_state` is
+`required` or `failed` for rows a node-local cleanup owns, whose `state` is
+`stopping`, `deleting` or `suspending`, and `none` otherwise. It replaces
+`sandbox.worker.lifecycle.count`, which folded those rows into
+`state:cleanup_required` and `state:cleanup_failed`. Runtime identity comes from
+the sandbox's recorded execution metadata, not the node's default,
+installed-binary inventory, or a mutable template tag. Runtime aliases are
+normalized to full names such as `firecracker` and `cloud-hypervisor`. Legacy
+rows without a valid recorded identity keep their known runtime kind and use
+`runtime_version:unknown`; an unrecognized kind is also `unknown`, never an
+assumed legacy version.
 
 With the default metric namespace, the running-state population by version is:
 
 ```text
-sum:space.sandbox.worker.lifecycle.count{state:started} by {runtime,runtime_version}
+sum:space.sandbox.worker.lifecycle.status_count{state:started} by {runtime,runtime_version}
 ```
 
 Placement identity comes from telemetry context. No sandbox, template, or
 execution identifier is a metric dimension. Summing the version buckets
 preserves the existing per-state total. The sampler emits zero once when a
-previously reported state/runtime/version bucket disappears, including when
-only the version changes. Database read failures skip the sample rather than
+previously reported state/cleanup/runtime/version bucket disappears, including
+when only the version changes. Database read failures skip the sample rather than
 reporting a false zero.
 
 These are locally recorded lifecycle populations, not an independent
 process-liveness census. `started`, `paused`, and `suspended` are distinct
 states; a suspended row describes retained state, not a resident VM. A
 missing or stale sample does not establish that a node has zero sandboxes.
-Metric backends with explicit tag-retention allowlists must retain `runtime`
-and `runtime_version` alongside `state` to support the version breakdown.
+Metric backends with explicit tag-retention allowlists must retain
+`cleanup_state`, `runtime` and `runtime_version` alongside `state` to support
+the cleanup and version breakdowns.
 
 ## Sandboxes in a transient lifecycle
 

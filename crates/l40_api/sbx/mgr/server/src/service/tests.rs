@@ -7214,6 +7214,7 @@ pub(crate) mod service_tests {
 
     #[tokio::test(start_paused = true)]
     async fn wait_completes_only_for_terminal_statuses_without_a_caller_deadline() {
+        use pplx_space_sbx_mgr_client::lifecycle::{ObservedCleanup, ObservedStatus};
         for state in [
             SandboxStatus::from(SandboxState::Quarantined),
             SandboxStatus::from(SandboxState::Stopped),
@@ -7236,10 +7237,14 @@ pub(crate) mod service_tests {
             .await;
             let expected = match state.cleanup {
                 Some(CleanupState::Required) => None,
-                Some(CleanupState::Failed) => {
-                    Some(crate::proto::SandboxLifecycleState::CleanupFailed)
-                }
-                None => Some(crate::proto::SandboxLifecycleState::from(state.lifecycle)),
+                Some(CleanupState::Failed) => Some(ObservedStatus {
+                    lifecycle: crate::proto::SandboxLifecycleState::from(state.lifecycle),
+                    cleanup: Some(ObservedCleanup::Failed),
+                }),
+                None => Some(ObservedStatus {
+                    lifecycle: crate::proto::SandboxLifecycleState::from(state.lifecycle),
+                    cleanup: None,
+                }),
             };
             if let Some(expected) = expected {
                 assert_eq!(
@@ -7247,7 +7252,7 @@ pub(crate) mod service_tests {
                         .expect("Wait must complete without requiring an API timeout")
                         .unwrap()
                         .into_inner()
-                        .observed_lifecycle()
+                        .observed_status()
                         .unwrap(),
                     expected,
                 );
@@ -13590,7 +13595,7 @@ pub(crate) mod service_tests {
             .pop()
             .expect("quarantined sandbox should be returned");
         assert_eq!(
-            published.observed_lifecycle().unwrap(),
+            published.observed_status().unwrap(),
             crate::proto::SandboxLifecycleState::Quarantined
         );
         assert_eq!(
@@ -13657,7 +13662,7 @@ pub(crate) mod service_tests {
                 .find(|sandbox| sandbox.sandbox_id == *sandbox_id)
                 .unwrap();
             assert_eq!(
-                published.observed_lifecycle().unwrap(),
+                published.observed_status().unwrap(),
                 crate::proto::SandboxLifecycleState::Quarantined
             );
             assert_eq!(
@@ -13780,7 +13785,7 @@ pub(crate) mod service_tests {
             .iter()
             .find(|sandbox| sandbox.sandbox_id == malformed_core_id)
             .expect("a malformed local row must still report its node lifecycle");
-        malformed_core.observed_lifecycle().unwrap_err();
+        malformed_core.observed_status().unwrap_err();
         assert!(malformed_core.state_degraded);
         assert_eq!(
             malformed_core.cleanup.map(|cleanup| cleanup.completion),
@@ -13802,7 +13807,7 @@ pub(crate) mod service_tests {
             .find(|sandbox| sandbox.sandbox_id == quarantined_id)
             .unwrap();
         assert_eq!(
-            quarantined.observed_lifecycle().unwrap(),
+            quarantined.observed_status().unwrap(),
             crate::proto::SandboxLifecycleState::Quarantined
         );
         assert_eq!(
@@ -13842,7 +13847,7 @@ pub(crate) mod service_tests {
             .find(|sandbox| sandbox.sandbox_id == healthy_id)
             .unwrap();
         assert_eq!(
-            healthy.observed_lifecycle().unwrap(),
+            healthy.observed_status().unwrap(),
             crate::proto::SandboxLifecycleState::Created
         );
         assert!(!healthy.state_degraded);

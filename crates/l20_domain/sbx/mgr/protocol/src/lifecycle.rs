@@ -35,8 +35,6 @@ impl SandboxLifecycleState {
             Self::Suspending => "suspending",
             Self::Suspended => "suspended",
             Self::Restoring => "restoring",
-            Self::CleanupRequired => "cleanup_required",
-            Self::CleanupFailed => "cleanup_failed",
             Self::Quarantined => "quarantined",
             Self::Failed => "failed",
         }
@@ -58,8 +56,6 @@ impl SandboxLifecycleState {
             "suspending" => Ok(Self::Suspending),
             "suspended" => Ok(Self::Suspended),
             "restoring" => Ok(Self::Restoring),
-            "cleanup_required" => Ok(Self::CleanupRequired),
-            "cleanup_failed" => Ok(Self::CleanupFailed),
             "quarantined" => Ok(Self::Quarantined),
             "failed" => Ok(Self::Failed),
             other => Err(LifecycleObservationError::UnknownLabel(other.to_string())),
@@ -79,41 +75,81 @@ pub fn decode_lifecycle(
     }
 }
 
-/// The status a reader decides from. A node publishes a cleanup that owns the
-/// row in `cleanup.state`, apart from its lifecycle, and may report the row
-/// under the teardown transition it is in rather than as `CleanupRequired` or
-/// `CleanupFailed`; either form decodes to the same status here, so a reader
-/// answers both alike. A cleanup state this build doesn't know fails closed.
-fn decode_status(
-    lifecycle: Option<i32>,
-    cleanup: Option<&SandboxCleanup>,
-) -> Result<SandboxLifecycleState, LifecycleObservationError> {
-    let lifecycle = decode_lifecycle(lifecycle)?;
-    let Some(raw) = cleanup.map(|cleanup| cleanup.state) else {
-        return Ok(lifecycle);
-    };
-    match SandboxCleanupState::try_from(raw) {
-        Ok(SandboxCleanupState::Unspecified) => Ok(lifecycle),
-        Ok(SandboxCleanupState::Required) => Ok(SandboxLifecycleState::CleanupRequired),
-        Ok(SandboxCleanupState::Failed) => Ok(SandboxLifecycleState::CleanupFailed),
-        Err(_) => Err(LifecycleObservationError::UnknownCleanupState(raw)),
+/// A cleanup that owns a sandbox row. A node publishes it in `cleanup.state`,
+/// apart from the lifecycle the cleanup is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObservedCleanup {
+    /// A forced teardown owns the row and is owed.
+    Required,
+    /// A teardown owns the row and its last attempt failed; it is retried.
+    Failed,
+}
+
+/// What a reader decides from: the lifecycle a node publishes and the cleanup
+/// that owns the row, if any. It equals a lifecycle only when no cleanup owns
+/// the row, so a cleanup-owned row passes no lifecycle check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObservedStatus {
+    pub lifecycle: SandboxLifecycleState,
+    pub cleanup: Option<ObservedCleanup>,
+}
+
+impl ObservedStatus {
+    /// The lifecycle, unless a cleanup owns the row.
+    pub fn unowned(self) -> Option<SandboxLifecycleState> {
+        self.cleanup.is_none().then_some(self.lifecycle)
+    }
+
+    /// The status label node-ctl publishes to the control plane:
+    /// `cleanup_required` or `cleanup_failed` for a cleanup-owned row,
+    /// otherwise the lifecycle's label.
+    pub fn label(self) -> &'static str {
+        match self.cleanup {
+            Some(ObservedCleanup::Required) => "cleanup_required",
+            Some(ObservedCleanup::Failed) => "cleanup_failed",
+            None => self.lifecycle.label(),
+        }
     }
 }
 
+impl PartialEq<SandboxLifecycleState> for ObservedStatus {
+    fn eq(&self, other: &SandboxLifecycleState) -> bool {
+        self.unowned() == Some(*other)
+    }
+}
+
+/// A cleanup state this build doesn't know fails closed.
+fn decode_status(
+    lifecycle: Option<i32>,
+    cleanup: Option<&SandboxCleanup>,
+) -> Result<ObservedStatus, LifecycleObservationError> {
+    let lifecycle = decode_lifecycle(lifecycle)?;
+    let raw = cleanup.map_or(SandboxCleanupState::Unspecified as i32, |cleanup| {
+        cleanup.state
+    });
+    let cleanup = match SandboxCleanupState::try_from(raw) {
+        Ok(SandboxCleanupState::Unspecified) => None,
+        Ok(SandboxCleanupState::Required) => Some(ObservedCleanup::Required),
+        Ok(SandboxCleanupState::Failed) => Some(ObservedCleanup::Failed),
+        Err(_) => return Err(LifecycleObservationError::UnknownCleanupState(raw)),
+    };
+    Ok(ObservedStatus { lifecycle, cleanup })
+}
+
 impl SandboxInfo {
-    pub fn observed_lifecycle(&self) -> Result<SandboxLifecycleState, LifecycleObservationError> {
+    pub fn observed_status(&self) -> Result<ObservedStatus, LifecycleObservationError> {
         decode_status(self.lifecycle, self.cleanup.as_ref())
     }
 }
 
 impl SandboxListElement {
-    pub fn observed_lifecycle(&self) -> Result<SandboxLifecycleState, LifecycleObservationError> {
+    pub fn observed_status(&self) -> Result<ObservedStatus, LifecycleObservationError> {
         decode_status(self.lifecycle, self.cleanup.as_ref())
     }
 }
 
 impl WaitResponse {
-    pub fn observed_lifecycle(&self) -> Result<SandboxLifecycleState, LifecycleObservationError> {
+    pub fn observed_status(&self) -> Result<ObservedStatus, LifecycleObservationError> {
         decode_status(self.lifecycle, self.cleanup.as_ref())
     }
 }

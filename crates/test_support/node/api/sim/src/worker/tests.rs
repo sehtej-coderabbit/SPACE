@@ -108,7 +108,7 @@ async fn create_then_state_then_start() {
         .into_inner();
     assert_eq!(state_resp.sandboxes.len(), 1);
     assert_eq!(
-        state_resp.sandboxes[0].observed_lifecycle().unwrap(),
+        state_resp.sandboxes[0].observed_status().unwrap(),
         sbx::SandboxLifecycleState::Creating
     );
     assert_eq!(state_resp.missing_ids, vec!["missing".to_string()]);
@@ -176,7 +176,7 @@ async fn stop_and_kill_reach_stopped() {
     assert_eq!(state_resp.sandboxes.len(), 2);
     for sandbox in state_resp.sandboxes {
         assert_eq!(
-            sandbox.observed_lifecycle().unwrap(),
+            sandbox.observed_status().unwrap(),
             sbx::SandboxLifecycleState::Stopped
         );
     }
