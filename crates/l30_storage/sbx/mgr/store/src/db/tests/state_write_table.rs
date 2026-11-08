@@ -268,6 +268,11 @@ fn classify(from: Node, to: Node) -> Option<Disagreement> {
 
 #[test]
 fn persisted_edges_disagree_with_the_admission_machine_only_as_allowlisted() {
+    assert_eq!(
+        Node::ALL.map(Node::status),
+        SandboxStatus::sweep(),
+        "edge and indexed-writer sweeps must cover the same statuses in the same order"
+    );
     let mut actual = BTreeMap::new();
     for from in Node::ALL {
         for to in Node::ALL {

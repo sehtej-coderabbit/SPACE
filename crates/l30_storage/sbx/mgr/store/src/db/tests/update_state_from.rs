@@ -19,7 +19,7 @@ use crate::db::{
     EDGES, EdgeSources, StateWriteGuard, StateWriteOutcome, StateWriteRefusal, edges, test_conn,
     update_state_from,
 };
-use crate::state::{SandboxState, SandboxStatus};
+use crate::state::{CleanupState, SandboxState, SandboxStatus};
 
 const IN_TRANSACTION: [bool; 2] = [false, true];
 
@@ -27,8 +27,25 @@ const IN_TRANSACTION: [bool; 2] = [false, true];
 /// `Receipt::ALL` by index.
 #[test]
 fn the_cases_cover_every_state_shape_and_receipt() {
+    let statuses = SandboxStatus::sweep();
     assert_eq!(
-        SandboxStatus::sweep().len(),
+        statuses
+            .into_iter()
+            .filter_map(SandboxStatus::unowned)
+            .collect::<Vec<_>>(),
+        SandboxState::all(),
+        "the indexed sweep must retain every lifecycle in enumeration order"
+    );
+    assert_eq!(
+        statuses
+            .into_iter()
+            .filter_map(|status| status.cleanup)
+            .collect::<Vec<_>>(),
+        [CleanupState::Required, CleanupState::Failed],
+        "the indexed sweep must retain each cleanup state exactly once"
+    );
+    assert_eq!(
+        statuses.len(),
         18,
         "add a case for the new state to each #[values(...)] below"
     );
