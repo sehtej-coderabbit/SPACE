@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::node_manager_transport::fake::{FakeNodeManager, ServedNodeManager};
 use crate::service::SandboxManagerServiceOptions;
+use crate::state::SandboxStatus;
 use pplx_space_common_core::types::{LocalArtifactId, SandboxActivationAttemptId};
 use pplx_space_common_core::types::{
     SandboxArtifactMetadata, SandboxId, SnapshotExecutionMetadata,
@@ -38,10 +39,11 @@ pub(in crate::service::runtime_upgrade) fn environments() -> (ExecutionMetadata,
 }
 
 pub(in crate::service::runtime_upgrade) fn fixture(
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     encrypted: bool,
     node: FakeNodeManager,
 ) -> Fixture {
+    let state = state.into();
     let (source, target) = environments();
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("cache");

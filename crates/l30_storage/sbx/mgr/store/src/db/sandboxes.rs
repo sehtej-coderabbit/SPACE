@@ -160,6 +160,12 @@ db_private_outside_tests! {
                             .into(),
                     )
                 })?;
+            // This legacy metric folds cleanup ownership across lifecycles.
+            // Normalize only its bucket key; status counts retain both columns.
+            let state = match state.cleanup {
+                Some(cleanup) => SandboxStatus::owned(SandboxState::Stopping, cleanup),
+                None => state,
+            };
             let runtime_label: String = row.get(1)?;
             let execution_runtime: Option<String> = row.get(2)?;
             let identity = execution_runtime

@@ -373,7 +373,7 @@ impl CleanupFixture {
 
     /// The sandbox kept `state` and gained no cleanup work or publication.
     fn assert_untouched(&self, id: &str, state: SandboxState, context: &str) {
-        assert_eq!(self.state(id), Some(state), "{context}");
+        assert_eq!(self.state(id), Some(state.into()), "{context}");
         assert!(
             crate::db::cleanup_episode(&self.service.db_conn().unwrap(), id)
                 .unwrap()
@@ -439,9 +439,9 @@ impl CleanupRpc {
     }
 
     /// Where a completed cleanup leaves the row.
-    fn completed_state(self) -> Option<SandboxState> {
+    fn completed_state(self) -> Option<SandboxStatus> {
         match self {
-            Self::Stop => Some(SandboxState::Stopped),
+            Self::Stop => Some(SandboxState::Stopped.into()),
             Self::Delete => None,
         }
     }
@@ -708,7 +708,11 @@ async fn nonblocking_cleanup_returns_once_admitted_and_honors_skip_node_publish(
             let ids = within_cleanup_wait(&context, call).await;
 
             assert_eq!(ids, vec![id.clone()], "{context}");
-            assert_eq!(fixture.state(&id), Some(rpc.admitted_state()), "{context}");
+            assert_eq!(
+                fixture.state(&id),
+                Some(rpc.admitted_state().into()),
+                "{context}"
+            );
             let job = fixture
                 .active_cleanup_job(&id)
                 .unwrap_or_else(|| panic!("{context}: admitted cleanup is durable"));
@@ -1173,7 +1177,7 @@ async fn delete_of_a_pool_clone_disposal_requires_an_operator_after_quarantine()
                 let error = result.unwrap_err();
                 assert_eq!(error.code(), code, "{}: {error}", case.name);
                 assert!(error.message().contains(message), "{}: {error}", case.name);
-                assert_eq!(fixture.state(&id), Some(held_state), "{}", case.name);
+                assert_eq!(fixture.state(&id), Some(held_state.into()), "{}", case.name);
                 assert_eq!(episode.requested_at, None, "{}", case.name);
                 assert!(fixture.active_cleanup_job(&id).is_none(), "{}", case.name);
             }

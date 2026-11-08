@@ -361,7 +361,7 @@ async fn lifecycle_and_job_completion_commit_together_and_recover(
         &conn,
         &subject,
         if artifact {
-            SandboxState::Suspended
+            SandboxState::Suspended.into()
         } else {
             initial
         },
@@ -370,7 +370,13 @@ async fn lifecycle_and_job_completion_commit_together_and_recover(
         register_full_suspend_artifact(&conn, &subject);
         conn.execute(
             "UPDATE sandboxes SET state = ?1 WHERE id = ?2",
-            [initial.as_str(), &subject],
+            [
+                initial
+                    .unowned()
+                    .expect("artifact fixture has no cleanup owner")
+                    .as_str(),
+                &subject,
+            ],
         )
         .unwrap();
     }
@@ -378,7 +384,9 @@ async fn lifecycle_and_job_completion_commit_together_and_recover(
         let episode = crate::db::begin_activation(
             &conn,
             &subject,
-            initial,
+            initial
+                .unowned()
+                .expect("activation starts without a cleanup owner"),
             kind,
             Some(ExecutionGeneration::new(1).unwrap()),
             Some(SandboxActivationAttemptId::new()),

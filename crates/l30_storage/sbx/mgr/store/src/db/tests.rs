@@ -281,6 +281,10 @@ fn cleanup_intent_cannot_be_replaced_by_suspend_or_resident_completion() {
             TestSandboxInsert::new(&id, "sandbox1", cleanup_state),
         );
         assert!(set_cleanup_intent(&conn, &id, false, CleanupCompletion::DeleteRow).unwrap());
+        let expected = SandboxStatus {
+            lifecycle: SandboxState::Deleting,
+            cleanup: cleanup_state.cleanup,
+        };
         for stale_completion in [
             &edges::PAUSE_BEGIN,
             &edges::PAUSE_COMPLETE,
@@ -290,13 +294,13 @@ fn cleanup_intent_cannot_be_replaced_by_suspend_or_resident_completion() {
             assert_eq!(
                 update_state_from(&conn, &id, stale_completion).unwrap(),
                 StateWriteOutcome::Refused {
-                    found: cleanup_state,
+                    found: expected,
                     refusal: StateWriteRefusal::Guard(StateWriteGuard::CleanupOwned),
                 }
             );
             assert!(!begin_suspend(&conn, &id).unwrap());
             let row = get_sandbox(&conn, &id).unwrap().unwrap();
-            assert_eq!(row.state, cleanup_state);
+            assert_eq!(row.state, expected);
             assert_eq!(row.cleanup_completion, Some(CleanupCompletion::DeleteRow));
         }
     }
@@ -7719,7 +7723,10 @@ fn startup_recovery_reconciles_interrupted_states_without_runtime_fields() {
                     completion
                 }
             );
-            assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+            assert_eq!(
+                row.state,
+                SandboxStatus::owned(*state, CleanupState::Required)
+            );
             assert_eq!(row.cleanup_keep_filesystem, Some(keep_filesystem));
             assert_eq!(row.cleanup_completion, Some(completion));
             assert!(row.failure_reason.as_deref().is_some_and(|reason| {

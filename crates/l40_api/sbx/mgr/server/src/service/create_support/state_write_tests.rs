@@ -25,7 +25,7 @@ fn state(conn: &crate::db::Connection, id: &str) -> SandboxStatus {
 type Write = fn(&crate::db::Connection, &str) -> Result<(), Status>;
 
 /// A writer's expected answer for the row with an id in each source state.
-type Outcomes = fn(&str, SandboxState) -> Expected;
+type Outcomes = fn(&str, SandboxStatus) -> Expected;
 
 const CREATE: &str = "complete sandbox create";
 const BASE_SNAPSHOT_CREATE: &str = "complete restored sandbox create";
@@ -81,7 +81,7 @@ fn create_completion_leaves_a_row_a_stop_admitted_to_the_stop() {
         assert_eq!(status.code(), tonic::Code::Aborted, "{}", case.name);
         assert_eq!(
             status.message(),
-            superseded(case.context, SandboxState::Stopping),
+            superseded(case.context, SandboxState::Stopping.into()),
             "{}",
             case.name
         );

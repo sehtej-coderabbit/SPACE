@@ -31,7 +31,7 @@ db_private_outside_tests! {
             let state = status_from_columns(1, state_value, cleanup_value)?;
             Ok(SandboxGuestHealthRow {
                 id: row.get(0)?,
-                state: state.into(),
+                state,
                 template_content_hash: row.get(2)?,
             })
         })?;

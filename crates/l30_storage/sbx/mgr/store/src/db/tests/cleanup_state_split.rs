@@ -78,7 +78,7 @@ fn a_cleanup_handoff_stores_the_teardown_transition_its_intent_names() {
         );
         assert_eq!(
             get_sandbox(&conn, &id).unwrap().unwrap().state,
-            SandboxStatus::CLEANUP_REQUIRED,
+            SandboxStatus::owned(lifecycle.parse().unwrap(), CleanupState::Required),
             "{from} {completion}"
         );
     }

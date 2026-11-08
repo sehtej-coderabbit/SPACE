@@ -69,7 +69,8 @@ async fn shutdown(service: SandboxManagerService) {
 }
 
 /// A row in `state`, with a local restore's columns when it is `restoring`.
-fn insert_row(conn: &crate::db::Connection, state: SandboxStatus) -> SandboxId {
+fn insert_row(conn: &crate::db::Connection, state: impl Into<SandboxStatus>) -> SandboxId {
+    let state = state.into();
     let sandbox_id = SandboxId::new();
     let id = sandbox_id.to_string();
     insert_test_sandbox(conn, &id, state);

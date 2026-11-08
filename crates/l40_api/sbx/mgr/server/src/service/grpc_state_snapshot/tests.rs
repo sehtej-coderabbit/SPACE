@@ -18,7 +18,7 @@ fn live_sandbox_state_includes_network_namespace() {
 
 #[test]
 fn cached_runtime_state_only_refines_resident_lifecycle() {
-    for state in SandboxStatus::all() {
+    for state in SandboxStatus::sweep() {
         for pid_alive in [false, true] {
             let expected = if pid_alive
                 && matches!(

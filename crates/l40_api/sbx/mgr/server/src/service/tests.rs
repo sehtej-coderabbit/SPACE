@@ -6922,7 +6922,10 @@ pub(crate) mod service_tests {
         let row = crate::db::get_sandbox(&conn, &sandbox_id_string)
             .unwrap()
             .unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Deleting, CleanupState::Required)
+        );
         assert_eq!(
             row.cleanup_completion,
             Some(crate::db::CleanupCompletion::DeleteRow)
@@ -7235,7 +7238,13 @@ pub(crate) mod service_tests {
             .into_inner();
             assert_eq!(
                 response.observed_lifecycle().unwrap(),
-                crate::proto::SandboxLifecycleState::from(state)
+                match state.cleanup {
+                    Some(CleanupState::Failed) =>
+                        crate::proto::SandboxLifecycleState::CleanupFailed,
+                    Some(CleanupState::Required) =>
+                        unreachable!("required cleanup does not complete Wait"),
+                    None => crate::proto::SandboxLifecycleState::from(state.lifecycle),
+                }
             );
         }
     }
@@ -9055,7 +9064,7 @@ pub(crate) mod service_tests {
         let events = capture.events.lock().unwrap();
         for (id, from_state, from_cleanup_state) in [
             (&plain, "stopping", "none"),
-            (&required, "cleanup_required", "required"),
+            (&required, "stopping", "required"),
         ] {
             let event = events
                 .iter()
@@ -9069,7 +9078,7 @@ pub(crate) mod service_tests {
             for (field, expected) in [
                 ("from_state", from_state),
                 ("from_cleanup_state", from_cleanup_state),
-                ("to_state", "cleanup_failed"),
+                ("to_state", "stopping"),
                 ("to_cleanup_state", "failed"),
             ] {
                 assert_eq!(
@@ -9168,11 +9177,16 @@ pub(crate) mod service_tests {
             .expect("cleanup_failed state transition must be visible in the sandbox timeline");
         assert_eq!(
             event.get("from_state").map(String::as_str),
-            Some("cleanup_required")
+            Some("stopping")
+        );
+        assert_eq!(event.get("to_state").map(String::as_str), Some("stopping"));
+        assert_eq!(
+            event.get("from_cleanup_state").map(String::as_str),
+            Some("required")
         );
         assert_eq!(
-            event.get("to_state").map(String::as_str),
-            Some("cleanup_failed")
+            event.get("to_cleanup_state").map(String::as_str),
+            Some("failed")
         );
         assert_eq!(
             event.get("error").map(String::as_str),
@@ -9267,7 +9281,10 @@ pub(crate) mod service_tests {
                     .is_some_and(|value| value == "stopping")
                 && event
                     .get("to_state")
-                    .is_some_and(|value| value == "cleanup_failed")
+                    .is_some_and(|value| value == "stopping")
+                && event
+                    .get("to_cleanup_state")
+                    .is_some_and(|value| value == "failed")
         }));
         assert!(!events.iter().any(|event| {
             event
@@ -13996,7 +14013,10 @@ pub(crate) mod service_tests {
         );
         let db = service.db.lock().expect("mutex poisoned");
         let row = crate::db::get_sandbox(&db, &sandbox_id).unwrap().unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+        );
         assert!(row.failure_reason.is_none());
         assert_eq!(row.current_local_artifact_id, Some(local_artifact_id));
         assert_eq!(
@@ -14050,7 +14070,10 @@ pub(crate) mod service_tests {
         assert!(snapshot_dir.join("snapshot.json").exists());
         let db = service.db.lock().expect("mutex poisoned");
         let row = crate::db::get_sandbox(&db, &sandbox_id).unwrap().unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+        );
         assert!(row.failure_reason.is_none());
         assert_eq!(row.current_local_artifact_id, Some(local_artifact_id));
         assert!(
@@ -15267,7 +15290,7 @@ pub(crate) mod service_tests {
                 if replace_pid {
                     SandboxStatus::from(SandboxState::Checkpointing)
                 } else {
-                    SandboxStatus::CLEANUP_REQUIRED
+                    SandboxStatus::owned(SandboxState::Deleting, CleanupState::Required)
                 }
             );
         }
@@ -15523,7 +15546,10 @@ pub(crate) mod service_tests {
             )
             .unwrap();
         let row = service.lookup_sandbox(&id).unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+        );
         assert_eq!(row.current_local_artifact_id, Some(artifact_id));
         assert_eq!(
             row.cleanup_completion,
@@ -15713,7 +15739,10 @@ pub(crate) mod service_tests {
                 .unwrap();
         }
         let row = service.lookup_sandbox(&good).unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+        );
         assert_eq!(row.current_local_artifact_id, Some(artifact));
         assert!(!staging.exists());
         assert_eq!(
@@ -15847,7 +15876,10 @@ pub(crate) mod service_tests {
         {
             let db = service.db.lock().expect("mutex poisoned");
             let row = crate::db::get_sandbox(&db, &sandbox_id).unwrap().unwrap();
-            assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+            assert_eq!(
+                row.state,
+                SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+            );
             assert_eq!(row.current_local_artifact_id, Some(local_artifact_id));
             assert_eq!(
                 row.current_local_artifact_kind,
@@ -16050,7 +16082,10 @@ pub(crate) mod service_tests {
 
         let db = service.db.lock().expect("mutex poisoned");
         let row = crate::db::get_sandbox(&db, &sandbox_id).unwrap().unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+        );
         assert_eq!(row.current_local_artifact_id, Some(local_artifact_id));
         assert_ne!(row.current_local_artifact_id, Some(predecessor_id));
         assert!(row.failure_reason.is_none());
@@ -19755,7 +19790,10 @@ pub(crate) mod service_tests {
 
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         let row = service.lookup_sandbox(&sandbox_id).unwrap();
-        assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED);
+        assert_eq!(
+            row.state,
+            SandboxStatus::owned(SandboxState::Deleting, CleanupState::Required)
+        );
         assert_eq!(
             row.cleanup_completion,
             Some(crate::db::CleanupCompletion::DeleteRow)

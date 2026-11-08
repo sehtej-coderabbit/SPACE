@@ -425,6 +425,15 @@ pub(super) fn sweep_lifecycle_pairs_and_cleanup_shapes(
             let case = format!("{shape:?}, {receipt} receipt: {from} -> {to}");
             let conn = test_conn();
             let id = seed(&conn, shape, from, receipt);
+            let seeded = match (from.cleanup, shape) {
+                (
+                    Some(cleanup),
+                    Shape::DeleteRowIntent
+                    | Shape::ArmedCreateEpisode
+                    | Shape::RequestedCreateEpisode,
+                ) => SandboxStatus::owned(SandboxState::Deleting, cleanup),
+                _ => from,
+            };
             let expected = cell(shape.grid()[index(from)], to);
             let applied = applied_diff(&id, from, to, receipt);
             check(
@@ -432,7 +441,7 @@ pub(super) fn sweep_lifecycle_pairs_and_cleanup_shapes(
                 &case,
                 &conn,
                 &id,
-                (Some(from), to),
+                (Some(seeded), to),
                 expected,
                 applied,
             );

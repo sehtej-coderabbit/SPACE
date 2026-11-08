@@ -342,7 +342,7 @@ fn reconcile_entry_skips_states_that_cannot_authorize_a_gateway() {
         SandboxStatus::from(SandboxState::Created),
         SandboxStatus::from(SandboxState::Stopped),
         SandboxStatus::from(SandboxState::Suspended),
-        SandboxState::Deleting,
+        SandboxState::Deleting.into(),
         SandboxStatus::CLEANUP_REQUIRED,
         SandboxStatus::CLEANUP_FAILED,
         SandboxStatus::from(SandboxState::Quarantined),

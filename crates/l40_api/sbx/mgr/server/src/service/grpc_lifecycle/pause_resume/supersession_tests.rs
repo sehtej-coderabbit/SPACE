@@ -171,8 +171,8 @@ enum Expected {
 
 /// The generic guard that refuses a `started` or `paused` write over `found`,
 /// as the generic guards' message names it, or `None` when only the from-set
-/// refuses. Written out per state from #372's `PLAIN` grid for a row with no
-/// cleanup intent or episode, not derived from the writer.
+/// refuses. Written out per status for a row with no cleanup intent or episode,
+/// not derived from the writer.
 fn guard_refusal(found: SandboxStatus) -> Option<&'static str> {
     match found.unowned() {
         Some(SandboxState::Stopping | SandboxState::Deleting) | None => {
@@ -388,7 +388,7 @@ fn assert_outcome(
 #[tokio::test]
 async fn pause_leaves_a_row_a_concurrent_stop_settled() {
     for exit in EXITS {
-        check_pause(exit, Interleave::Stop, SandboxState::Stopped).await;
+        check_pause(exit, Interleave::Stop, SandboxState::Stopped.into()).await;
     }
 }
 

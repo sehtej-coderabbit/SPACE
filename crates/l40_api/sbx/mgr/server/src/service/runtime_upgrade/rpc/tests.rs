@@ -1530,7 +1530,7 @@ async fn an_activation_meeting_a_moving_sandbox_is_retryable() {
 #[tokio::test]
 async fn a_stopped_target_meeting_a_moving_sandbox_is_retryable() {
     for state in [
-        SandboxState::Stopping,
+        SandboxState::Stopping.into(),
         SandboxStatus::CLEANUP_REQUIRED,
         SandboxStatus::CLEANUP_FAILED,
     ] {

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use super::database_rows;
 
 use crate::db::Connection;
-use crate::state::SandboxStatus;
+use crate::state::{CleanupState, SandboxStatus};
 use pplx_space_common_core::types::{
     ArtifactKind, ArtifactOrigin, AutoLifecyclePolicy, ExactStorageUri, ExecutionGeneration,
     LocalArtifactId, SandboxCleanupEpisodeId, SandboxId, SandboxOwner, SandboxQuarantineNextAction,
@@ -354,7 +354,10 @@ fn prepared_clone_disposal_rearms_only_its_own_quarantined_pool_clone_episode() 
         record_cleanup_episode_failure(&conn, &exhausted, exhausted_cleanup, "clone delete failed")
             .unwrap()
     );
-    assert_eq!(row(&conn, &exhausted).state, SandboxStatus::CLEANUP_FAILED);
+    assert_eq!(
+        row(&conn, &exhausted).state,
+        SandboxStatus::owned(SandboxState::Deleting, CleanupState::Failed)
+    );
     let before = database_rows(&conn);
     assert!(!rearm_prepared_clone_disposal(&conn, &exhausted, exhausted_cleanup).unwrap());
     assert_unchanged(&conn, &before, "requested disposal is not quarantined");
@@ -401,7 +404,11 @@ fn prepared_clone_disposal_rearms_only_its_own_quarantined_pool_clone_episode() 
             "{case}"
         );
         let rearmed = row(&conn, id);
-        assert_eq!(rearmed.state, SandboxStatus::CLEANUP_REQUIRED, "{case}");
+        assert_eq!(
+            rearmed.state,
+            SandboxStatus::owned(SandboxState::Deleting, CleanupState::Required),
+            "{case}"
+        );
         assert_eq!(
             rearmed.cleanup_completion,
             Some(CleanupCompletion::DeletePoolClone),
@@ -698,7 +705,10 @@ fn suspended_cleanup_pin_requires_a_suspending_row_and_a_refusal_keeps_prior_art
     let artifact = LocalArtifactId::new();
     pin_suspended_artifact_for_cleanup(&conn, &id, artifact, &snapshot_path(&id)).unwrap();
     let pinned = row(&conn, &id);
-    assert_eq!(pinned.state, SandboxStatus::CLEANUP_REQUIRED);
+    assert_eq!(
+        pinned.state,
+        SandboxStatus::owned(SandboxState::Suspending, CleanupState::Required)
+    );
     assert_eq!(pinned.current_local_artifact_id, Some(artifact));
     assert_eq!(pinned.current_local_artifact_kind, Some(ArtifactKind::Full));
     assert_eq!(
@@ -830,7 +840,19 @@ fn stopped_artifact_publication_accepts_only_stop_completions_and_unpinned_stopp
             _ => unreachable!(),
         }
         let staged = row(&conn, &id);
-        assert_eq!(staged.state, state);
+        let lifecycle = match completion {
+            CleanupCompletion::DeleteRow | CleanupCompletion::DeletePoolClone => {
+                SandboxState::Deleting
+            }
+            _ => SandboxState::Stopping,
+        };
+        assert_eq!(
+            staged.state,
+            SandboxStatus {
+                lifecycle,
+                cleanup: state.cleanup
+            }
+        );
         assert_eq!(staged.cleanup_completion, Some(completion));
         id
     };

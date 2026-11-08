@@ -316,7 +316,11 @@ async fn pool_clone_publication_and_disposal_are_exclusive() {
                 crate::db::CleanupEpisodeRequestOutcome::Superseded
             );
         } else {
-            assert_eq!(row.state, SandboxStatus::CLEANUP_REQUIRED, "{outcome}");
+            assert_eq!(
+                row.state,
+                SandboxStatus::owned(SandboxState::Deleting, CleanupState::Required),
+                "{outcome}"
+            );
             assert!(
                 !row.failure_reason
                     .as_deref()
@@ -396,7 +400,7 @@ async fn pool_clone_restart_preserves_disposal_ownership() {
             .unwrap()
             .unwrap()
             .state,
-        SandboxStatus::CLEANUP_REQUIRED
+        SandboxStatus::owned(SandboxState::Deleting, CleanupState::Required)
     );
     assert!(!crate::db::complete_pool_clone(&db, &id.to_string(), cleanup_id).unwrap());
     assert_eq!(
