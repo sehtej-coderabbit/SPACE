@@ -16247,6 +16247,11 @@ pub(crate) mod service_tests {
                 .await
                 .unwrap();
 
+            assert_eq!(
+                info.lifecycle,
+                Some(crate::proto::SandboxLifecycleState::from(state.lifecycle) as i32),
+                "{state}"
+            );
             let owner = match state.unowned() {
                 None if state.cleanup == Some(crate::state::CleanupState::Required) => {
                     Some(Owner::Required)
