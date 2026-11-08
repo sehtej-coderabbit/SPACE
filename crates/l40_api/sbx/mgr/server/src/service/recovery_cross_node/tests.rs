@@ -2,6 +2,7 @@ use pplx_space_common_core::types::{LocalArtifactId, SandboxId, SnapshotId};
 
 use super::*;
 use crate::service::tests::service_tests::service_with_runtime_probe;
+use crate::state::SandboxStatus;
 
 /// The reclamation fences wait rather than discarding a finished transfer.
 ///
@@ -1928,7 +1929,7 @@ async fn cross_node_restore_declines_an_existing_row_that_is_not_an_interrupted_
     let mut cases = Vec::new();
     // `Restoring` is excluded: whether it is declined depends on the row's restore
     // fields, which the table below varies one condition at a time.
-    for state in SandboxState::all()
+    for state in SandboxStatus::sweep()
         .into_iter()
         .filter(|state| *state != SandboxState::Restoring)
     {

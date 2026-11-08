@@ -1515,7 +1515,7 @@ async fn legacy_reupload_refusals_classify_as_state_skips_or_retryable_failures(
     )) {
         return;
     }
-    use crate::state::SandboxState;
+    use crate::state::{SandboxState, SandboxStatus};
     use pplx_space_common_core::types::SandboxId;
 
     let service = SandboxManagerService::for_test(open_test_db());
@@ -1532,13 +1532,13 @@ async fn legacy_reupload_refusals_classify_as_state_skips_or_retryable_failures(
     // Not covered: a `Suspended` row passes state admission, and its artifact
     // checks then read the fixed sandbox cache root, which this fixture cannot
     // isolate.
-    for state in SandboxState::all() {
+    for state in SandboxStatus::sweep() {
         if state == SandboxState::Suspended {
             continue;
         }
         let conn = open_test_db();
         let id = SandboxId::new().to_string();
-        insert_sandbox(&conn, &id, state.as_str(), 0);
+        insert_sandbox(&conn, &id, state.legacy_label(), 0);
         let service = SandboxManagerService::for_test(conn);
 
         let refused = service

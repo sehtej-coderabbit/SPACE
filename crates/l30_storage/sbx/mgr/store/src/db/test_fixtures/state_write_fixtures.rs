@@ -776,7 +776,7 @@ pub fn decorate(conn: &Connection, id: &str, receipt: SandboxState) {
 /// `customize` adjust them, and pass them to `insert`.
 pub fn with_sandbox_params<T>(
     id: &str,
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     customize: impl FnOnce(&mut InsertSandboxParams<'_>),
     insert: impl FnOnce(InsertSandboxParams<'_>) -> T,
 ) -> T {

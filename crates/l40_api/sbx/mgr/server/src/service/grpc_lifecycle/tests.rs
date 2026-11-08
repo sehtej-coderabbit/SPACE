@@ -426,12 +426,12 @@ fn current_instance_backup_preserves_scoped_drain_signals() {
     };
     use pplx_space_common_core::types::ArtifactKind;
     for kind in [ArtifactKind::Disk, ArtifactKind::Full] {
-        for state in SandboxState::all() {
+        for state in SandboxStatus::sweep() {
             let result = current_instance_backup_precondition(state, kind);
             let valid = matches!(
-                (state, kind),
-                (SandboxState::Stopped, ArtifactKind::Disk)
-                    | (SandboxState::Suspended, ArtifactKind::Full)
+                (state.unowned(), kind),
+                (Some(SandboxState::Stopped), ArtifactKind::Disk)
+                    | (Some(SandboxState::Suspended), ArtifactKind::Full)
             );
             assert_eq!(result.is_ok(), valid, "{state:?}/{kind:?}");
             if let Err(error) = result {
@@ -2105,7 +2105,11 @@ fn stored_sandbox(service: &SandboxManagerService, id: &str) -> Option<crate::db
 
 /// Suspend admission skips its plaintext-COW probe, which inspects the host
 /// cache directory, for a sandbox with an encrypted volume.
-fn insert_encrypted_test_sandbox(conn: &crate::db::Connection, id: &str, state: SandboxState) {
+fn insert_encrypted_test_sandbox(
+    conn: &crate::db::Connection,
+    id: &str,
+    state: impl Into<SandboxStatus>,
+) {
     crate::service::tests::service_tests::insert_test_sandbox(conn, id, state);
     conn.execute(
         "UPDATE sandboxes SET volume_encryption = 1 WHERE id = ?1",
@@ -2252,7 +2256,7 @@ async fn pause_refuses_rows_that_cannot_enter_pausing_before_writing_state() {
     use crate::service::tests::service_tests::insert_test_sandbox;
 
     let sockets = tempfile::tempdir().unwrap();
-    for state in SandboxState::all()
+    for state in SandboxStatus::sweep()
         .into_iter()
         .filter(|state| *state != SandboxState::Started)
     {
@@ -2272,16 +2276,18 @@ async fn pause_refuses_rows_that_cannot_enter_pausing_before_writing_state() {
 
         // A transient state is another operation in flight: retryable.
         let in_flight = matches!(
-            state,
-            SandboxState::Creating
-                | SandboxState::Starting
-                | SandboxState::Stopping
-                | SandboxState::Deleting
-                | SandboxState::Pausing
-                | SandboxState::Resuming
-                | SandboxState::Checkpointing
-                | SandboxState::Suspending
-                | SandboxState::Restoring
+            state.unowned(),
+            Some(
+                SandboxState::Creating
+                    | SandboxState::Starting
+                    | SandboxState::Stopping
+                    | SandboxState::Deleting
+                    | SandboxState::Pausing
+                    | SandboxState::Resuming
+                    | SandboxState::Checkpointing
+                    | SandboxState::Suspending
+                    | SandboxState::Restoring
+            )
         );
         let expected = if in_flight {
             tonic::Code::Unavailable
@@ -2304,10 +2310,12 @@ async fn suspend_refuses_rows_that_are_neither_started_nor_paused() {
     use pplx_space_common_core::node_drain_signals::SUSPEND_SANDBOX_FAILED_MARKER;
 
     let sockets = tempfile::tempdir().unwrap();
-    for state in SandboxState::all()
-        .into_iter()
-        .filter(|state| !matches!(state, SandboxState::Started | SandboxState::Paused))
-    {
+    for state in SandboxStatus::sweep().into_iter().filter(|state| {
+        !matches!(
+            state.unowned(),
+            Some(SandboxState::Started | SandboxState::Paused)
+        )
+    }) {
         let conn = crate::db::test_conn();
         let id = SandboxId::new().to_string();
         insert_encrypted_test_sandbox(&conn, &id, state);

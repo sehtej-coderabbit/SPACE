@@ -229,11 +229,19 @@ fn checkpoint_admission_of_a_missing_row_reports_it() {
 
 #[tokio::test]
 async fn skipped_checkpoint_never_publishes_an_artifact() {
-    let cases = SandboxState::all()
+    let cases = SandboxStatus::sweep()
         .into_iter()
-        .filter(|state| !matches!(state, SandboxState::Started | SandboxState::Paused))
+        .filter(|state| {
+            !matches!(
+                state.unowned(),
+                Some(SandboxState::Started | SandboxState::Paused)
+            )
+        })
         .map(|state| (state, false))
-        .chain([(SandboxState::Started, true), (SandboxState::Paused, true)]);
+        .chain([
+            (SandboxState::Started.into(), true),
+            (SandboxState::Paused.into(), true),
+        ]);
     for (state, pool_member) in cases {
         let (ctx, sandbox_id) = checkpoint_context(state);
         if pool_member {

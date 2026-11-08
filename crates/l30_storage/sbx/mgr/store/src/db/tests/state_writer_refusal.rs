@@ -59,12 +59,14 @@ fn assert_no_rows(result: crate::db::Result<()>, case: &str) {
     );
 }
 
-/// Every lifecycle state except the ones a writer accepts, so a refusal sweep
-/// also covers states added to the enum later.
-fn states_except(accepted: &[SandboxState]) -> impl Iterator<Item = SandboxState> + '_ {
-    SandboxState::all()
-        .into_iter()
-        .filter(move |state| !accepted.contains(state))
+/// Every lifecycle or cleanup-owned status except the unowned lifecycles a
+/// writer accepts, so refusal sweeps retain cleanup coverage.
+fn states_except(accepted: &[SandboxState]) -> impl Iterator<Item = SandboxStatus> + '_ {
+    SandboxStatus::sweep().into_iter().filter(move |state| {
+        !state
+            .unowned()
+            .is_some_and(|lifecycle| accepted.contains(&lifecycle))
+    })
 }
 
 fn row(conn: &Connection, id: &str) -> SandboxRow {
@@ -80,7 +82,7 @@ fn snapshot_path(id: &str) -> String {
 }
 
 fn with_insert_params<T>(
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     insert: impl FnOnce(InsertSandboxParams<'_>) -> T,
 ) -> (String, T) {
     let sandbox_id = SandboxId::new();
@@ -113,7 +115,7 @@ fn with_insert_params<T>(
     (id, inserted)
 }
 
-fn insert_row(conn: &Connection, state: SandboxState) -> String {
+fn insert_row(conn: &Connection, state: impl Into<SandboxStatus>) -> String {
     let (id, inserted) = with_insert_params(state, |params| insert_sandbox(conn, params));
     inserted.unwrap();
     id
@@ -124,9 +126,16 @@ fn insert_row(conn: &Connection, state: SandboxState) -> String {
 /// inserted as a create's and other states are reached by moving it afterwards.
 fn insert_with_episode(
     conn: &Connection,
-    state: SandboxState,
+    state: impl Into<SandboxStatus>,
     completion: CleanupCompletion,
 ) -> (String, SandboxCleanupEpisodeId) {
+    let state = state.into();
+    let state = match (state.cleanup, completion) {
+        (Some(cleanup), CleanupCompletion::DeleteRow | CleanupCompletion::DeletePoolClone) => {
+            SandboxStatus::owned(SandboxState::Deleting, cleanup)
+        }
+        _ => state,
+    };
     let cleanup_id = SandboxCleanupEpisodeId::new();
     let (id, inserted) = with_insert_params(SandboxState::Creating, |params| {
         insert_sandbox_with_cleanup_episode_and_route_evidence(
@@ -289,7 +298,7 @@ fn interrupted_pause_recovery_settles_only_a_pausing_row() {
             !recover_interrupted_pause_state(&conn, &id, PauseFailedRecoveryTarget::Started)
                 .unwrap()
         );
-        assert_unchanged(&conn, &before, state.as_str());
+        assert_unchanged(&conn, &before, state.legacy_label());
     }
     let before = database_rows(&conn);
     assert!(
@@ -314,7 +323,7 @@ fn prepared_clone_disposal_rearms_only_its_own_quarantined_pool_clone_episode() 
             !rearm_prepared_clone_disposal(&conn, &id, cleanup_id).unwrap(),
             "{state}"
         );
-        assert_unchanged(&conn, &before, state.as_str());
+        assert_unchanged(&conn, &before, state.legacy_label());
     }
     let quarantine_create = |id: &str| {
         assert!(
@@ -444,9 +453,9 @@ fn teardown_suspend_begins_only_from_paused_and_a_refusal_enqueues_nothing() {
         let before = database_rows(&conn);
         assert_no_rows(
             begin_teardown_suspend(&conn, &id, generation).map(|_| ()),
-            state.as_str(),
+            state.legacy_label(),
         );
-        assert_unchanged(&conn, &before, state.as_str());
+        assert_unchanged(&conn, &before, state.legacy_label());
     }
 
     let id = insert_row(&conn, SandboxState::Paused);
@@ -491,7 +500,7 @@ fn suspend_rollback_returns_only_a_suspending_row_to_paused() {
 
     let (suspended, _) = insert_suspended_with_artifact(&conn);
     let refused = states_except(&[SandboxState::Suspending])
-        .map(|state| (state.as_str(), insert_row(&conn, state)))
+        .map(|state| (state.legacy_label(), insert_row(&conn, state)))
         .chain([
             ("already paused", resuspend),
             ("suspended with its artifact", suspended),
@@ -658,7 +667,10 @@ fn resident_resume_rollback_settles_only_a_resuming_row() {
 
     let resuming = insert_row(&conn, SandboxState::Resuming);
     let before = database_rows(&conn);
-    for target in states_except(&[SandboxState::Started, SandboxState::Paused]) {
+    for target in SandboxState::all()
+        .into_iter()
+        .filter(|state| !matches!(state, SandboxState::Started | SandboxState::Paused))
+    {
         assert!(
             matches!(
                 restore_resident_resume_state(&conn, &resuming, target),
@@ -676,7 +688,7 @@ fn resident_resume_rollback_settles_only_a_resuming_row() {
             !restore_resident_resume_state(&conn, &id, SandboxState::Started).unwrap(),
             "{state}"
         );
-        assert_unchanged(&conn, &before, state.as_str());
+        assert_unchanged(&conn, &before, state.legacy_label());
     }
 }
 
@@ -685,7 +697,7 @@ fn suspended_cleanup_pin_requires_a_suspending_row_and_a_refusal_keeps_prior_art
     let conn = test_conn();
     let (suspended, prior) = insert_suspended_with_artifact(&conn);
     let refused = states_except(&[SandboxState::Suspending])
-        .map(|state| (state.as_str(), insert_row(&conn, state)))
+        .map(|state| (state.legacy_label(), insert_row(&conn, state)))
         .chain([("suspended with its artifact", suspended)])
         .collect::<Vec<_>>();
     for (case, id) in &refused {
@@ -761,7 +773,7 @@ fn restored_suspended_publication_requires_an_unpinned_restoring_row() {
         let (suspended, prior) = insert_suspended_with_artifact(&conn);
         let (pinned_restore, _, _) = insert_local_restore(&conn);
         let refused = states_except(&[SandboxState::Restoring])
-            .map(|state| (state.as_str(), insert_row(&conn, state)))
+            .map(|state| (state.legacy_label(), insert_row(&conn, state)))
             .chain([
                 ("suspended with its artifact", suspended),
                 ("restoring with a pinned artifact", pinned_restore),
@@ -813,8 +825,11 @@ fn restored_disk_as_new_publication_requires_a_restoring_row() {
         set_runtime_pid(&conn, &id);
         add_transfer_scope(&conn, &id);
         let before = database_rows(&conn);
-        assert_no_rows(publish_restored_disk_as_new(&conn, &id), state.as_str());
-        assert_unchanged(&conn, &before, state.as_str());
+        assert_no_rows(
+            publish_restored_disk_as_new(&conn, &id),
+            state.legacy_label(),
+        );
+        assert_unchanged(&conn, &before, state.legacy_label());
     }
 
     // `restored_disk_as_new_becomes_a_stopped_sandbox_without_donor_runtime_identity`
@@ -906,7 +921,7 @@ fn stopped_artifact_publication_accepts_only_stop_completions_and_unpinned_stopp
         .map(|state| {
             let id = insert_row(&conn, state);
             set_runtime_pid(&conn, &id);
-            (state.as_str(), id)
+            (state.legacy_label(), id)
         })
         .collect::<Vec<_>>();
     let (suspended, _) = insert_suspended_with_artifact(&conn);
@@ -954,7 +969,7 @@ fn stopped_eviction_claim_binds_the_state_and_the_observed_version() {
         .map(|state| {
             let other = insert_row(&conn, state);
             let version = row(&conn, &other).updated_at;
-            (state.as_str(), other, version)
+            (state.legacy_label(), other, version)
         })
         .chain([("stale version", id.clone(), stale_version(&observed))])
         .collect::<Vec<_>>();
@@ -988,7 +1003,7 @@ fn pinned_suspended_eviction_claim_with_a_version_requires_state_pin_and_version
             let other = insert_row(&conn, state);
             let other_pin = set_suspend_pin(&conn, &other).to_string();
             let version = row(&conn, &other).updated_at;
-            (state.as_str(), other, other_pin, version)
+            (state.legacy_label(), other, other_pin, version)
         })
         .chain([
             (
