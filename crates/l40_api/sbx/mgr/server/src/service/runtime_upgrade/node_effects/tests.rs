@@ -123,6 +123,7 @@ impl Fixture {
             &self.service.db.lock().unwrap(),
             &self.sandbox_id,
             self.target.environment().unwrap(),
+            crate::db::RuntimeUpgradeTargetState::Started,
             identity,
         )
     }
@@ -880,6 +881,91 @@ async fn a_wake_upgrade_of_a_sandbox_already_on_its_target_wakes_it_as_usual() {
             .any(|call| call.contains("BtrfsSnapshot") || call.contains("InstanceSnapshot")),
         "{:?}",
         f._node.calls()
+    );
+}
+
+/// Record `operation_id` abandoned for `sandbox_id`, as the control plane's
+/// `AbandonRuntimeUpgrade` does.
+fn abandon(service: &crate::service::SandboxManagerService, sandbox_id: &str, operation_id: &str) {
+    assert_eq!(
+        crate::db::abandon_runtime_upgrade(
+            &service.db.lock().unwrap(),
+            sandbox_id,
+            operation_id.parse().unwrap(),
+        )
+        .unwrap(),
+        crate::db::AbandonRuntimeUpgrade::Abandoned
+    );
+}
+
+/// A Wake carrying an upgrade the control plane abandoned on this node is
+/// refused, even for a sandbox already on its target, which the Wake would
+/// otherwise go on to start.
+#[tokio::test]
+async fn a_wake_carrying_an_abandoned_upgrade_never_wakes_the_sandbox() {
+    let f = fixture(SandboxState::Stopped, false, FakeNodeManager::default());
+    crate::db::upsert_sandbox_execution_metadata(
+        &f.service.db.lock().unwrap(),
+        &f.sandbox_id,
+        &f.target,
+    )
+    .unwrap();
+    let operation_id = uuid::Uuid::now_v7().to_string();
+    abandon(&f.service, &f.sandbox_id, &operation_id);
+
+    let error = f
+        .service
+        .wake(crate::service::activation_support::internal_request(
+            upgrade_wake(
+                &f.sandbox_id,
+                Some(wake_upgrade_to(&f.target, &operation_id)),
+            ),
+        ))
+        .await
+        .expect_err("an abandoned upgrade is refused");
+
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error}");
+    assert!(error.message().contains("abandoned"), "{error}");
+    assert_eq!(f.row().state, SandboxState::Stopped);
+    assert!(f._node.calls().is_empty(), "{:?}", f._node.calls());
+}
+
+/// A Wake carrying an abandoned upgrade for a sandbox the node doesn't hold
+/// is refused before it stages the sandbox from its checkpoint.
+#[tokio::test]
+async fn a_wake_carrying_an_abandoned_upgrade_stages_nothing() {
+    let service = crate::service::SandboxManagerService::for_test(crate::db::test_conn());
+    let sandbox_id = SandboxId::new().to_string();
+    let source = environments().0;
+    let target = certified_target(&source);
+    let operation_id = uuid::Uuid::now_v7().to_string();
+    abandon(&service, &sandbox_id, &operation_id);
+    let mut upgrade = wake_upgrade_to(&target, &operation_id);
+    upgrade.checkpoint_local_artifact_id = Some(LocalArtifactId::new().to_string());
+    let mut request = upgrade_wake(&sandbox_id, Some(upgrade));
+    request
+        .start_context
+        .as_mut()
+        .unwrap()
+        .suspend_restore_storage_uri = Some(format!(
+        "s3://space-test/suspend/{sandbox_id}/{}?region=us-east-1",
+        uuid::Uuid::now_v7()
+    ));
+
+    let error = service
+        .wake(crate::service::activation_support::internal_request(
+            request,
+        ))
+        .await
+        .expect_err("an abandoned upgrade is refused");
+
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error}");
+    assert!(error.message().contains("abandoned"), "{error}");
+    assert!(
+        crate::db::get_sandbox(&service.db.lock().unwrap(), &sandbox_id)
+            .unwrap()
+            .is_none(),
+        "nothing was staged"
     );
 }
 

@@ -48,6 +48,7 @@ const (
 	SandboxManager_EvictClusterDeletedSandbox_FullMethodName             = "/space.sandbox.manager.v1.SandboxManager/EvictClusterDeletedSandbox"
 	SandboxManager_UpgradeRuntime_FullMethodName                         = "/space.sandbox.manager.v1.SandboxManager/UpgradeRuntime"
 	SandboxManager_GetRuntimeUpgrade_FullMethodName                      = "/space.sandbox.manager.v1.SandboxManager/GetRuntimeUpgrade"
+	SandboxManager_AbandonRuntimeUpgrade_FullMethodName                  = "/space.sandbox.manager.v1.SandboxManager/AbandonRuntimeUpgrade"
 	SandboxManager_EnableSnapshots_FullMethodName                        = "/space.sandbox.manager.v1.SandboxManager/EnableSnapshots"
 	SandboxManager_DisableSnapshots_FullMethodName                       = "/space.sandbox.manager.v1.SandboxManager/DisableSnapshots"
 	SandboxManager_ListSnapshots_FullMethodName                          = "/space.sandbox.manager.v1.SandboxManager/ListSnapshots"
@@ -189,9 +190,17 @@ type SandboxManagerClient interface {
 	// the old checkpoint. Files survive; memory and processes don't. A failed
 	// boot restores the old pair and releases the fence. Idempotent per
 	// `operation_id`: a retry resumes or settles the same upgrade. A rolled-back
-	// upgrade keeps only its outcome, so a retry after it starts over. A
-	// sandbox already on the target is activated in place for a STARTED
-	// target, and a suspended one absent from the node may be staged first;
+	// upgrade keeps only its outcome, recorded for the pod its `start` named
+	// (`route_identity.pod_uid`), and so does a request refused before it
+	// fenced anything with FAILED_PRECONDITION or INVALID_ARGUMENT, which a
+	// retry can't change. Either is final for that pod, even after a later
+	// pod's outcome replaces it in `GetRuntimeUpgrade`: a retry from the same
+	// pod UID gets the recorded failure back with FAILED_PRECONDITION and never
+	// fences or boots again. Any other refusal is left unrecorded, so a retry
+	// from the same pod tries again. A retry from a new pod, or one naming no
+	// pod, starts over. A sandbox already on the target is activated in place
+	// for a STARTED target, and a suspended one absent from the node may be
+	// staged first;
 	// see `UpgradeRuntimeRequest.target_state` and `stage_from`, and
 	// `GetRuntimeUpgrade` for what the node records.
 	UpgradeRuntime(ctx context.Context, in *UpgradeRuntimeRequest, opts ...grpc.CallOption) (*UpgradeRuntimeResponse, error)
@@ -200,6 +209,16 @@ type SandboxManagerClient interface {
 	// shim runs the upgrade at container create, so the control plane reads the
 	// outcome here.
 	GetRuntimeUpgrade(ctx context.Context, in *GetRuntimeUpgradeRequest, opts ...grpc.CallOption) (*GetRuntimeUpgradeResponse, error)
+	// Internal-only: give up one `UpgradeRuntime` operation on this node, so
+	// no later call for it fences or boots, from any pod. A Kubernetes pod's
+	// shim calls `UpgradeRuntime` from its container create, and that call can
+	// still be on its way after the pod is gone; the control plane abandons the
+	// operation before it captures the sandbox's disk, so such a call can't
+	// change the disk after the capture. Answers ABORTED while the operation
+	// fences the sandbox, since its boot may still change the disk. Idempotent:
+	// abandoning an operation the node already abandoned, settled or never
+	// saw records it abandoned and succeeds.
+	AbandonRuntimeUpgrade(ctx context.Context, in *AbandonRuntimeUpgradeRequest, opts ...grpc.CallOption) (*AbandonRuntimeUpgradeResponse, error)
 	// Enable rolling btrfs snapshots for a sandbox.
 	EnableSnapshots(ctx context.Context, in *EnableSnapshotsRequest, opts ...grpc.CallOption) (*EnableSnapshotsResponse, error)
 	// Disable rolling btrfs snapshots for a sandbox.
@@ -601,6 +620,16 @@ func (c *sandboxManagerClient) GetRuntimeUpgrade(ctx context.Context, in *GetRun
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRuntimeUpgradeResponse)
 	err := c.cc.Invoke(ctx, SandboxManager_GetRuntimeUpgrade_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) AbandonRuntimeUpgrade(ctx context.Context, in *AbandonRuntimeUpgradeRequest, opts ...grpc.CallOption) (*AbandonRuntimeUpgradeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AbandonRuntimeUpgradeResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_AbandonRuntimeUpgrade_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1307,9 +1336,17 @@ type SandboxManagerServer interface {
 	// the old checkpoint. Files survive; memory and processes don't. A failed
 	// boot restores the old pair and releases the fence. Idempotent per
 	// `operation_id`: a retry resumes or settles the same upgrade. A rolled-back
-	// upgrade keeps only its outcome, so a retry after it starts over. A
-	// sandbox already on the target is activated in place for a STARTED
-	// target, and a suspended one absent from the node may be staged first;
+	// upgrade keeps only its outcome, recorded for the pod its `start` named
+	// (`route_identity.pod_uid`), and so does a request refused before it
+	// fenced anything with FAILED_PRECONDITION or INVALID_ARGUMENT, which a
+	// retry can't change. Either is final for that pod, even after a later
+	// pod's outcome replaces it in `GetRuntimeUpgrade`: a retry from the same
+	// pod UID gets the recorded failure back with FAILED_PRECONDITION and never
+	// fences or boots again. Any other refusal is left unrecorded, so a retry
+	// from the same pod tries again. A retry from a new pod, or one naming no
+	// pod, starts over. A sandbox already on the target is activated in place
+	// for a STARTED target, and a suspended one absent from the node may be
+	// staged first;
 	// see `UpgradeRuntimeRequest.target_state` and `stage_from`, and
 	// `GetRuntimeUpgrade` for what the node records.
 	UpgradeRuntime(context.Context, *UpgradeRuntimeRequest) (*UpgradeRuntimeResponse, error)
@@ -1318,6 +1355,16 @@ type SandboxManagerServer interface {
 	// shim runs the upgrade at container create, so the control plane reads the
 	// outcome here.
 	GetRuntimeUpgrade(context.Context, *GetRuntimeUpgradeRequest) (*GetRuntimeUpgradeResponse, error)
+	// Internal-only: give up one `UpgradeRuntime` operation on this node, so
+	// no later call for it fences or boots, from any pod. A Kubernetes pod's
+	// shim calls `UpgradeRuntime` from its container create, and that call can
+	// still be on its way after the pod is gone; the control plane abandons the
+	// operation before it captures the sandbox's disk, so such a call can't
+	// change the disk after the capture. Answers ABORTED while the operation
+	// fences the sandbox, since its boot may still change the disk. Idempotent:
+	// abandoning an operation the node already abandoned, settled or never
+	// saw records it abandoned and succeeds.
+	AbandonRuntimeUpgrade(context.Context, *AbandonRuntimeUpgradeRequest) (*AbandonRuntimeUpgradeResponse, error)
 	// Enable rolling btrfs snapshots for a sandbox.
 	EnableSnapshots(context.Context, *EnableSnapshotsRequest) (*EnableSnapshotsResponse, error)
 	// Disable rolling btrfs snapshots for a sandbox.
@@ -1526,6 +1573,9 @@ func (UnimplementedSandboxManagerServer) UpgradeRuntime(context.Context, *Upgrad
 }
 func (UnimplementedSandboxManagerServer) GetRuntimeUpgrade(context.Context, *GetRuntimeUpgradeRequest) (*GetRuntimeUpgradeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRuntimeUpgrade not implemented")
+}
+func (UnimplementedSandboxManagerServer) AbandonRuntimeUpgrade(context.Context, *AbandonRuntimeUpgradeRequest) (*AbandonRuntimeUpgradeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AbandonRuntimeUpgrade not implemented")
 }
 func (UnimplementedSandboxManagerServer) EnableSnapshots(context.Context, *EnableSnapshotsRequest) (*EnableSnapshotsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method EnableSnapshots not implemented")
@@ -2185,6 +2235,24 @@ func _SandboxManager_GetRuntimeUpgrade_Handler(srv interface{}, ctx context.Cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SandboxManagerServer).GetRuntimeUpgrade(ctx, req.(*GetRuntimeUpgradeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_AbandonRuntimeUpgrade_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbandonRuntimeUpgradeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).AbandonRuntimeUpgrade(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_AbandonRuntimeUpgrade_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).AbandonRuntimeUpgrade(ctx, req.(*AbandonRuntimeUpgradeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3178,6 +3246,10 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRuntimeUpgrade",
 			Handler:    _SandboxManager_GetRuntimeUpgrade_Handler,
+		},
+		{
+			MethodName: "AbandonRuntimeUpgrade",
+			Handler:    _SandboxManager_AbandonRuntimeUpgrade_Handler,
 		},
 		{
 			MethodName: "EnableSnapshots",

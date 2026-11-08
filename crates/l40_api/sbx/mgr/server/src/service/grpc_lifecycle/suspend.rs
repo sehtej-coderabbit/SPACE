@@ -203,6 +203,10 @@ impl SandboxManagerService {
         {
             return Ok(Response::new(response));
         }
+        // A runtime upgrade that must leave the sandbox stopped runs it
+        // between its verified boot and its retirement, and stops it itself:
+        // suspended there, it would never reach the state it reports.
+        self.refuse_suspend_during_stay_stopped_upgrade(&sandbox.id)?;
         let (blocking_local_artifact_id, publication) = self
             .prepare_suspend_snapshot_publication_after_locks(
                 &context,

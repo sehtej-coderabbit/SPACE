@@ -1327,10 +1327,19 @@ blocking cold `Start` to run, and whether the sandbox ends started or stopped.
    disk binding nor node-manager's cold-boot admission compares state formats.
    The target is saved as the sandbox's consumer in the same transaction that
    moves the row to `booting`. The checkpoint's producer evidence isn't rewritten.
+   Until the boot is verified, the State RPC that node-ctl publishes from
+   reports the previous consumer instead (the one a rollback restores): a
+   failed boot's cleanup stops the sandbox with the target still saved, and
+   the control plane reads a stopped sandbox published under the target as
+   an upgrade that reached it.
 4. **Boot.** The ordinary blocking cold start runs as the caller. It reads the
    saved consumer, and guest readiness verifies the boot: the transaction that
    marks the sandbox started also records the upgrade verified, so a later
-   stop or suspend can never make a verified boot look interrupted.
+   stop or suspend can never make a verified boot look interrupted. On
+   Kubernetes the boot's route identity, a new execution in the upgrade's pod,
+   replaces the teardown proof the sandbox's stop kept (the old execution's
+   generation and pod UID), as any cold start's does, provided it's a newer
+   execution.
 5. **Settle.** After a verified boot, the old checkpoint is retired and the
    preserved copy deleted. Then a request to end stopped stops the execution the
    boot started, never a later one, and only while it's started or paused: the
@@ -1363,10 +1372,39 @@ blocking cold `Start` to run, and whether the sandbox ends started or stopped.
    on its old environment.
 
 A retry with the same operation id resumes from the row: an interrupted upgrade
-rolls back and starts again, and a verified one finishes its retirement. A
-rolled-back upgrade leaves no row, so a retry after it starts over. Its failure
-stays in `sandbox_runtime_upgrade_outcomes`, as does an upgrade that found the
-sandbox already on its target, for `GetRuntimeUpgrade` below. An upgrade
+rolls back, and a verified one finishes its retirement. A rolled-back upgrade
+leaves no row; its failure stays in `sandbox_runtime_upgrade_outcomes`, as does
+an upgrade that found the sandbox already on its target, for
+`GetRuntimeUpgrade` below. Both tables record the pod each upgrade ran for:
+the pod UID the request's start names (`route_identity.pod_uid`). A rollback
+is final for that pod. A retry from the same pod UID gets the recorded
+failure back with `FailedPrecondition` and never fences or boots again; only a
+retry from a new pod, or from a caller that names no pod (such as an operator
+upgrading a Direct sandbox), starts over. A request from a pod that's refused
+before it fences anything for a reason no retry changes, with
+`FailedPrecondition` or `InvalidArgument` (the edge isn't certified, the
+checkpoint isn't the decided one, consent is missing, the sandbox isn't
+stopped or suspended, its local disk is missing), is recorded the same way, as
+a `refused` outcome for that pod, final for it as a rollback is. A transient
+refusal (the sandbox changed while it was inspected, a cleanup owns it,
+another upgrade fences it, node-manager or staging failed) isn't recorded, so
+kubelet's retry from the same pod tries again. A refusal replaces an earlier
+pod's rollback or refusal as the operation's outcome, so the report never
+gives a newer pod's refusal an older attempt's reason, but never an
+already-on-target outcome, and it's recorded only while the node holds the
+sandbox. Each pod's rollback or refusal also stays in
+`sandbox_runtime_upgrade_pod_outcomes`, keyed by operation and pod UID, which
+the finality check reads: a later pod's outcome replaces the earlier one in
+the report, but a delayed retry from the earlier pod still gets its own
+outcome back and never fences again. An upgraded or already-on-target outcome is answered to any pod as
+before, but for a started target the pod's create can still fail after it:
+the sandbox runs another pod's execution, moved off the execution the start
+was decided on, or the activation itself failed. The node records that
+refusal for the pod in `sandbox_runtime_upgrade_refused_pods`, only while the
+operation's report is upgraded or already on target, and it's final for that
+pod as a rollback is: the pod's retries get it back with `FailedPrecondition`
+and never activate the sandbox, while a retry from a new pod is answered
+afresh. A request that names no pod records none. An upgrade
 that must end stopped leaves the sandbox as it finds it if the sandbox stopped,
 suspended or started another execution first. A
 sandbox-manager recovery loop settles unfinished upgrades at startup and every
@@ -1440,9 +1478,59 @@ doesn't render it yet.
   with the pod's status.
 - **`GetRuntimeUpgrade`.** The shim's response doesn't reach the control
   plane, which reads the outcome from this read-only RPC instead: absent, in
-  progress (with its phase), upgraded, rolled back (with its failure) or
-  already on target. Node-api forwards it on `WorkerApiInternal` only for a
-  caller with the control-plane authority a policy write needs.
+  progress (with its phase), upgraded, rolled back (with its failure),
+  refused (with its failure) or already on target, with the pod UID the
+  reported attempt ran for (`pod_uid`). An upgraded or already-on-target
+  report also names the latest pod whose create it refused, with that
+  refusal (`refused_pod_uid`, `refused_pod_failure`). Node-api forwards it on
+  `WorkerApiInternal` only for a caller with the control-plane authority a
+  policy write needs. It also reports `abandoned` once the operation is
+  abandoned (below).
+- **`AbandonRuntimeUpgrade`.** A pod that's gone doesn't prove its shim's
+  `UpgradeRuntime` call is: one force-deleted mid-create can still have the
+  call on its way to the node. So a caller that's about to capture the
+  sandbox's disk first abandons the operation. Sandbox-manager takes the
+  sandbox's upgrade lock, which an `UpgradeRuntime` holds for its whole call,
+  so an upgrade running there finishes first. An unsettled operation whose
+  target is `stopped` is settled first, as a retry of it would be (an
+  interrupted one rolls back, and a verified boot stops the sandbox and
+  retires what it superseded). An unsettled operation whose target is
+  `started` answers `ABORTED`: it's left to its own retry or to the recovery
+  loop, and the caller asks again. A settling that fails answers its error, recording nothing. Then the operation is recorded abandoned in
+  `sandbox_runtime_upgrade_abandoned`, and every later `UpgradeRuntime` for
+  it, from any pod, is refused with `FAILED_PRECONDITION` before it stages,
+  fences or boots. A Wake carrying it is refused the same way where the Wake
+  would run the upgrade: before staging an absent sandbox for it, and before
+  the upgrade of a stopped or suspended one, including one already on the
+  upgrade's target. A Wake that doesn't reach the upgrade (the sandbox is
+  paused or still being created) wakes it as a Wake without the upgrade
+  would, which abandonment doesn't bar. Nor does abandonment wait for a Wake
+  already past its check: its start or restore of a sandbox the upgrade
+  found on its target runs after the upgrade lock is released. Abandonment is for a Kubernetes pod's
+  operation, and a Kubernetes sandbox never takes an upgrade on a Wake. Abandoning an operation already abandoned, settled or never
+  seen succeeds, and so does one for a sandbox the node doesn't hold, since a
+  late call carrying `stage_from` would stage it; the record outlives the
+  sandbox's row. One recorded for another sandbox answers
+  `INVALID_ARGUMENT`.
+  Node-api forwards it on `WorkerApiInternal` under the same authority as
+  `GetRuntimeUpgrade`.
+
+A failed upgrade fails the pod's sandbox create, so the pod stays pending in
+`ContainerCreating`, with no container ever ending, while kubelet retries the
+create under the same pod UID. Per-pod finality is what makes that safe to
+wait on: once the node records a pod's rollback or final refusal, no retry
+from that pod can still upgrade the disk, and the report names the pod it's
+for (`pod_uid`, `refused_pod_uid`), so a caller waiting on one pod can tell
+its own outcome from another pod's.
+
+Between a verified boot to a `stopped` target and the upgrade's retirement,
+the sandbox runs unfenced while the upgrade waits to stop it, and a suspend
+there would leave it suspended. So while such an upgrade is unretired, a due
+auto-suspend is held like a non-actionable stage and reconsidered once the
+upgrade retires, and a user's `Suspend` and a teardown suspend
+(`PrepareTeardownSuspend`'s drive) answer a retryable `UNAVAILABLE` before
+anything is captured; the teardown drive is deferred and asked again. While an upgrade fences the sandbox, the State
+RPC publishes the execution a rollback restores, not the target.
 
 Only the control plane writes sandbox pods, and the annotations are the
 upgrade's authorization: a principal that can create a sandbox pod can request
@@ -1462,12 +1550,33 @@ sandbox-manager that predates activation answers `ALREADY_ON_TARGET` with no
 execution, and the shim fails the create.
 
 A sandbox-manager from this release applies the
-`sandbox_runtime_upgrade_outcomes` migration at startup, and an older one
-refuses a database whose migration history holds a version it doesn't bundle.
-So a rollback build reverts the code but keeps that migration, its files under
-`db/sandbox-manager/` and its entry in the store's migration list, as
-`db/README.md` requires of any binary rollback. The table only adds rows, and
-nothing older reads it.
+`sandbox_runtime_upgrade_outcomes`, `sandbox_runtime_upgrade_pod_uid`,
+`sandbox_runtime_upgrade_refused_pods`,
+`sandbox_runtime_upgrade_pod_outcomes` and
+`sandbox_runtime_upgrade_abandoned` migrations at startup, and an older one refuses a database whose migration
+history holds a version it doesn't bundle. So a rollback build reverts the
+code but keeps those migrations, their files under `db/sandbox-manager/` and
+their entries in the store's migration list, as `db/README.md` requires of any
+binary rollback. The outcome table only adds rows, and nothing older reads it.
+The pod UID columns are nullable, and every row written before them reads as
+naming no pod, which proves nothing to the control plane. The pod UID
+migration's down migration refuses while a `refused` outcome is recorded,
+since an older release can't read one, and the refused-pods migration's down
+migration refuses while a refused pod is recorded, since an older release
+would let that pod's retried create activate the sandbox. The pod-outcomes
+migration's down migration refuses while any pod's outcome is recorded, since
+an older release reads only the operation's latest outcome and would let a
+delayed retry from an earlier pod fence the sandbox again. The abandoned
+migration's down migration refuses while an abandoned operation is recorded,
+since an older release would let a late call for it change a disk the
+control plane has already captured.
+
+A sandbox-manager that predates these fields reports no `pod_uid`,
+`refused_pod_uid` or `abandoned`, and one that predates
+`AbandonRuntimeUpgrade`, or sits behind a node-api that does, answers it
+`UNIMPLEMENTED`. A caller has to treat each of those as an outcome it can't
+confirm, so deploy sandbox-manager and node-api before any control plane
+that relies on them.
 
 ### Upgrading at resume and start
 

@@ -1024,6 +1024,11 @@ impl SandboxManagerService {
         let active_generation = Some(execution_generation);
         let result: Result<(), Status> = match (status.state, status.artifact) {
             (SandboxState::Started | SandboxState::Paused, _) => {
+                // As for a user's Suspend: a runtime upgrade that must leave
+                // the sandbox stopped runs it until it retires, and stops it
+                // itself. Refused retryably, so the drive is deferred and
+                // asked again rather than recorded as failed.
+                self.refuse_suspend_during_stay_stopped_upgrade(&sandbox_id_string)?;
                 let context = SuspendRequestContext::for_teardown(
                     sandbox_id_string.clone(),
                     execution_generation,

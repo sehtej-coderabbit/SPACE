@@ -672,7 +672,13 @@ impl SandboxManagerService {
                 ..Default::default()
             };
             // An upgrade boots the staged disk, so the checkpoint is staged
-            // and left suspended rather than launched.
+            // and left suspended rather than launched. An abandoned one
+            // stages nothing. This runs outside the upgrade lock, so it only
+            // spares the transfer: the check under that lock, before the
+            // upgrade itself, is the one an abandon is ordered against.
+            if let Some(upgrade) = &start.runtime_upgrade {
+                self.refuse_abandoned_runtime_upgrade(upgrade.operation_id())?;
+            }
             let staged = if start.runtime_upgrade.is_some() {
                 // Boxed, like the upgrade it precedes: inlined, the staging
                 // future would grow every Wake's state machine.

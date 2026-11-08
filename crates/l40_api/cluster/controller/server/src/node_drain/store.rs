@@ -5388,3 +5388,6 @@ mod stopped_replacement_tests;
 /// the one cluster pin a fresh evacuation may take, and each one it refuses.
 #[cfg(test)]
 mod stopped_re_drain_tests;
+
+#[cfg(test)]
+mod not_yet_stopped_backup_tests;
