@@ -16336,16 +16336,25 @@ pub(crate) mod service_tests {
             SandboxCleanupCompletion as Completion, SandboxCleanupState as Owner,
             SandboxLifecycleState as Lifecycle,
         };
-        let conn = crate::db::test_conn();
-        let id = SandboxId::new().to_string();
-        insert_test_sandbox(&conn, &id, SandboxStatus::CLEANUP_FAILED);
-        crate::db::set_cleanup_intent(&conn, &id, false, crate::db::CleanupCompletion::DeleteRow)
+        for (status, owner) in [
+            (SandboxStatus::CLEANUP_REQUIRED, Owner::Required),
+            (SandboxStatus::CLEANUP_FAILED, Owner::Failed),
+        ] {
+            let conn = crate::db::test_conn();
+            let id = SandboxId::new().to_string();
+            insert_test_sandbox(&conn, &id, status);
+            crate::db::set_cleanup_intent(
+                &conn,
+                &id,
+                false,
+                crate::db::CleanupCompletion::DeleteRow,
+            )
             .unwrap();
-        conn.execute("UPDATE sandboxes SET user = '' WHERE id = ?1", [&id])
-            .unwrap();
-        let service = service_for_teardown_test(conn);
+            conn.execute("UPDATE sandboxes SET user = '' WHERE id = ?1", [&id])
+                .unwrap();
+            let service = service_for_teardown_test(conn);
 
-        let response =
+            let response =
             <SandboxManagerService as crate::proto::sandbox_manager_server::SandboxManager>::state(
                 &service,
                 internal_request(StateRequest {
@@ -16355,18 +16364,19 @@ pub(crate) mod service_tests {
             .await
             .unwrap()
             .into_inner();
-        let info = response
-            .sandboxes
-            .iter()
-            .find(|sandbox| sandbox.sandbox_id == id)
-            .expect("a degraded row is still published");
-        assert!(info.state_degraded);
-        assert_eq!(info.lifecycle, Some(Lifecycle::Deleting as i32));
-        assert_eq!(
-            info.cleanup
-                .map(|cleanup| (cleanup.completion, cleanup.state)),
-            Some((Completion::DeleteRow as i32, Owner::Failed as i32))
-        );
+            let info = response
+                .sandboxes
+                .iter()
+                .find(|sandbox| sandbox.sandbox_id == id)
+                .expect("a degraded row is still published");
+            assert!(info.state_degraded);
+            assert_eq!(info.lifecycle, Some(Lifecycle::Deleting as i32));
+            assert_eq!(
+                info.cleanup
+                    .map(|cleanup| (cleanup.completion, cleanup.state)),
+                Some((Completion::DeleteRow as i32, owner as i32))
+            );
+        }
     }
 
     #[tokio::test]
