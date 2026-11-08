@@ -440,10 +440,12 @@ fn fold_sandbox_status(table: &str, values: &mut Row) {
     if table != "sandboxes" {
         return;
     }
-    if let Some(status) = values.remove("legacy_state") {
-        values.insert("state".to_owned(), status);
+    if let Some(Value::Text(cleanup)) = values.remove("cleanup_state") {
+        values.insert(
+            "state".to_owned(),
+            Value::Text(format!("cleanup_{cleanup}")),
+        );
     }
-    values.remove("cleanup_state");
 }
 
 /// Write `edge` with `update_state_from`, which must apply.

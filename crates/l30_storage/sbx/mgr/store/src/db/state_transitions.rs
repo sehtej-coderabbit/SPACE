@@ -179,7 +179,7 @@ pub fn update_state_superseding_activation_in_transaction(
         )?;
         // A cleanup-owned row keeps its cleanup state until the admission
         // write below, so it moves to `stopping`, the teardown transition
-        // that allows no intent; its `legacy_state` is unchanged.
+        // that allows no intent; its combined status is unchanged.
         conn.execute(
             "UPDATE sandboxes
                 SET cleanup_completion = NULL,
@@ -406,7 +406,8 @@ pub fn mark_teardown_suspend_backup_permanently_failed(
          SET failure_reason = ?1,
              updated_at = ?2
          WHERE id = ?3
-           AND legacy_state = 'suspending'
+           AND state = 'suspending'
+           AND cleanup_state IS NULL
            AND current_local_artifact_id = ?4
            AND (failure_reason IS NULL OR failure_reason != ?1)",
         params![reason, now()?, id, staged_artifact.to_string()],
@@ -449,7 +450,8 @@ pub fn clear_teardown_suspend_backup_permanently_failed(
          SET failure_reason = NULL,
              updated_at = ?1
          WHERE id = ?2
-           AND legacy_state IN ('suspending', 'suspended')
+           AND state IN ('suspending', 'suspended')
+           AND cleanup_state IS NULL
            AND current_local_artifact_id = ?3
            AND failure_reason = ?4",
         params![now()?, id, staged_artifact.to_string(), marker],
@@ -460,7 +462,8 @@ pub fn clear_teardown_suspend_backup_permanently_failed(
         "SELECT EXISTS (
              SELECT 1 FROM sandboxes
              WHERE id = ?1
-               AND legacy_state IN ('suspending', 'suspended')
+               AND state IN ('suspending', 'suspended')
+               AND cleanup_state IS NULL
                AND current_local_artifact_id = ?2
          )",
         params![id, staged_artifact.to_string()],
@@ -980,7 +983,8 @@ pub fn rollback_suspending_to_paused(conn: &Connection, id: &str) -> Result<bool
              state_changed_at = CASE WHEN state != 'paused' THEN ?1 ELSE state_changed_at END,
              updated_at = ?1
          WHERE id = ?2
-           AND legacy_state = 'suspending'",
+           AND state = 'suspending'
+           AND cleanup_state IS NULL",
         params![now()?, id],
     )?;
     Ok(changed == 1)

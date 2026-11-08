@@ -1,14 +1,16 @@
 //! Cleanup ownership is stored apart from the lifecycle: `state` keeps the
 //! lifecycle and `cleanup_state` the cleanup that owns the row. These pin the
 //! stored columns the cleanup writers leave; the other suites pin the combined
-//! status, which every read decodes from `legacy_state`.
+//! status every read decodes from the two.
 
 use super::*;
 
-/// `(state, cleanup_state, legacy_state)` as stored.
+/// `(state, cleanup_state)` as stored, and the combined status they decode to.
 fn stored(conn: &Connection, id: &str) -> (String, Option<String>, String) {
     conn.query_row(
-        "SELECT state, cleanup_state, legacy_state FROM sandboxes WHERE id = ?1",
+        "SELECT state, cleanup_state,
+                CASE WHEN cleanup_state IS NULL THEN state ELSE 'cleanup_' || cleanup_state END
+           FROM sandboxes WHERE id = ?1",
         params![id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
@@ -179,6 +181,14 @@ const MIGRATION_UP: &str = include_str!(
 const MIGRATION_DOWN: &str = include_str!(
     "../../../../../../../../db/sandbox-manager/20261105142930_sandbox_cleanup_state.down.sql"
 );
+/// The later migration that drops `legacy_state`, which the split's down
+/// migration reads.
+const LEGACY_DROP_UP: &str = include_str!(
+    "../../../../../../../../db/sandbox-manager/20261108120000_drop_sandbox_legacy_state.up.sql"
+);
+const LEGACY_DROP_DOWN: &str = include_str!(
+    "../../../../../../../../db/sandbox-manager/20261108120000_drop_sandbox_legacy_state.down.sql"
+);
 
 /// Insert a row in the split form, keeping the filesystem for every
 /// completion that keeps the row.
@@ -300,6 +310,7 @@ fn the_migration_round_trips_every_cleanup_shape_and_keeps_historical_labels() {
             .collect()
     };
 
+    conn.execute_batch(LEGACY_DROP_DOWN).unwrap();
     conn.execute_batch(MIGRATION_DOWN).unwrap();
     assert_eq!(
         labels(&conn),
@@ -315,6 +326,7 @@ fn the_migration_round_trips_every_cleanup_shape_and_keeps_historical_labels() {
     );
 
     conn.execute_batch(MIGRATION_UP).unwrap();
+    conn.execute_batch(LEGACY_DROP_UP).unwrap();
     // A migration can't tell a handed-off suspend from a restore rollback, so
     // `c` comes back `stopping`; its combined status is unchanged.
     for (id, expected) in [

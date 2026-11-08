@@ -290,7 +290,8 @@ pub fn stage_teardown_suspend_artifact(
              suspend_predecessor_artifact_id = NULL,
              updated_at = ?2
          WHERE id = ?3
-           AND legacy_state = 'suspending'",
+           AND state = 'suspending'
+           AND cleanup_state IS NULL",
         params![local_artifact_id.to_string(), now()?, id],
     )?;
     if changed != 1 {
@@ -424,7 +425,8 @@ pub(crate) fn teardown_owned_suspending_rows(
         "SELECT s.id, j.payload, j.status, s.space_api_route_execution_generation
            FROM sandboxes AS s
            JOIN jobs AS j ON j.subject_id = s.id
-          WHERE s.legacy_state = 'suspending'
+          WHERE s.state = 'suspending'
+            AND s.cleanup_state IS NULL
             AND j.kind = ?1
             AND j.status IN ('pending', 'running')
           ORDER BY s.id, j.created_at, j.job_id"
@@ -615,12 +617,13 @@ db_private_outside_tests! {
     ) -> Result<Option<TeardownSuspendStatus>> {
         let status = conn
             .query_row(
-                "SELECT s.legacy_state,
+                "SELECT s.state,
                 s.current_local_artifact_id,
                 s.current_local_artifact_kind,
                 s.current_local_artifact_origin,
                 a.local_path,
-                COALESCE(a.backup_completed_at IS NOT NULL, FALSE)
+                COALESCE(a.backup_completed_at IS NOT NULL, FALSE),
+                s.cleanup_state
          FROM sandboxes AS s
          LEFT JOIN local_artifacts AS a
            ON a.local_artifact_id = s.current_local_artifact_id
@@ -629,16 +632,20 @@ db_private_outside_tests! {
                 params![sandbox_id],
                 |row| {
                     let state_text = row.get::<_, String>(0)?;
-                    let state = state_text.parse::<SandboxState>().map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            Type::Text,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("unknown sandbox state {state_text:?}"),
-                            )),
-                        )
-                    })?;
+                    let cleanup_text = row.get::<_, Option<String>>(6)?;
+                    let state = SandboxState::from_columns(&state_text, cleanup_text.as_deref())
+                        .ok_or_else(|| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                Type::Text,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!(
+                                        "unknown sandbox state {state_text:?}, cleanup {cleanup_text:?}"
+                                    ),
+                                )),
+                            )
+                        })?;
                     let local_artifact_id = row
                         .get::<_, Option<String>>(1)?
                         .map(|value| {

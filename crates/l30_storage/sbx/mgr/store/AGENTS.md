@@ -35,9 +35,11 @@ there, but not a build or dev dependency, nor `libsqlite3-sys`.
   refused write must leave every row unchanged.
 - `sandboxes.state` holds lifecycle states only; `cleanup_state` (`required`,
   `failed`) records a cleanup that owns the row, over the teardown transition
-  its intent names. Decide from the combined status by reading the generated
-  `legacy_state`, except where an index needs `state` and the triggers make
-  the two equal. A write of a lifecycle state clears `cleanup_state`, and a
+  its intent names. The triggers allow a cleanup only over `stopping`,
+  `deleting` or `suspending`, so a predicate on another lifecycle reads
+  `state` alone; one on those three also needs `cleanup_state IS NULL`.
+  Compare `cleanup_state` with `IS`, `IS NOT` or `IS NULL`, which a `NULL`
+  can't turn unknown. A write of a lifecycle state clears `cleanup_state`, and a
   cleanup write sets both in one statement; the triggers in
   `db/sandbox-manager/20261105142930_sandbox_cleanup_state.up.sql` reject
   any other shape.

@@ -11268,7 +11268,7 @@ pub(crate) mod service_tests {
             .lock()
             .expect("mutex poisoned")
             .query_row(
-                "SELECT legacy_state FROM sandboxes WHERE id = ?1",
+                "SELECT CASE WHEN cleanup_state IS NULL THEN state ELSE 'cleanup_' || cleanup_state END FROM sandboxes WHERE id = ?1",
                 [&sandbox_id_string],
                 |row| row.get::<_, String>(0),
             )

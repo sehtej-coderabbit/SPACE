@@ -1322,7 +1322,7 @@ fn claim_cas_binds_to_the_checked_updated_at() {
     );
     let state: String = conn
         .query_row(
-            "SELECT legacy_state FROM sandboxes WHERE id = 'sbx-version'",
+            "SELECT CASE WHEN cleanup_state IS NULL THEN state ELSE 'cleanup_' || cleanup_state END FROM sandboxes WHERE id = 'sbx-version'",
             [],
             |r| r.get(0),
         )
@@ -1348,7 +1348,7 @@ fn claim_cas_rejects_non_suspended_rows() {
     );
     let state: String = conn
         .query_row(
-            "SELECT legacy_state FROM sandboxes WHERE id = 'sbx-claim'",
+            "SELECT CASE WHEN cleanup_state IS NULL THEN state ELSE 'cleanup_' || cleanup_state END FROM sandboxes WHERE id = 'sbx-claim'",
             [],
             |r| r.get(0),
         )
@@ -1378,7 +1378,7 @@ fn claim_cas_binds_the_proven_pin() {
     );
     let state: String = conn
         .query_row(
-            "SELECT legacy_state FROM sandboxes WHERE id = 'sbx-bind'",
+            "SELECT CASE WHEN cleanup_state IS NULL THEN state ELSE 'cleanup_' || cleanup_state END FROM sandboxes WHERE id = 'sbx-bind'",
             [],
             |r| r.get(0),
         )

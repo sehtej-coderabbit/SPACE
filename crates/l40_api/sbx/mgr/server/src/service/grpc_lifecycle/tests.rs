@@ -2809,7 +2809,7 @@ async fn suspend_publication_failure_after_staging_preserves_only_owned_evidence
                 .lock()
                 .unwrap()
                 .query_row(
-                    "SELECT legacy_state FROM sandboxes WHERE id = ?1",
+                    "SELECT CASE WHEN cleanup_state IS NULL THEN state ELSE 'cleanup_' || cleanup_state END FROM sandboxes WHERE id = ?1",
                     [&id],
                     |row| row.get(0),
                 )
