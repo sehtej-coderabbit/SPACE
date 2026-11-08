@@ -396,12 +396,17 @@ fn full_rollback_restage_writes_only_over_a_stopped_row() {
         AlreadySuspended,
         Refused(String),
     }
-    for state in SandboxStatus::sweep() {
+    for state in SandboxStatus::all() {
         let expected = match state.unowned() {
             Some(SandboxState::Stopped) => Expected::Restaged,
             Some(SandboxState::Suspended) => Expected::AlreadySuspended,
             // The generic guard: a deleting row owns its `delete_row` cleanup.
             Some(SandboxState::Deleting) => Expected::Refused(
+                "complete process snapshot suspension: sandbox state write was not applied: \
+                 superseded_by_cleanup_episode"
+                    .to_string(),
+            ),
+            None if state.lifecycle == SandboxState::Deleting => Expected::Refused(
                 "complete process snapshot suspension: sandbox state write was not applied: \
                  superseded_by_cleanup_episode"
                     .to_string(),
@@ -433,6 +438,10 @@ fn full_rollback_restage_writes_only_over_a_stopped_row() {
         let conn = crate::db::test_conn();
         let id = SandboxId::new().to_string();
         crate::service::tests::service_tests::insert_test_sandbox_with_runtime(&conn, &id, state);
+        assert_eq!(
+            crate::db::get_sandbox(&conn, &id).unwrap().unwrap().state,
+            state
+        );
         crate::db::test_fixtures::state_write_fixtures::decorate(&conn, &id, SandboxState::Started);
         let before = crate::db::test_fixtures::database_rows(&conn);
 

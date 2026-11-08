@@ -391,7 +391,7 @@ fn template_base_snapshot_writes_return_only_a_checkpointing_row_to_paused() {
 /// Every other row keeps every table unchanged and reports why.
 #[test]
 fn template_base_snapshot_admission_writes_only_over_a_paused_row() {
-    for state in SandboxStatus::sweep() {
+    for state in SandboxStatus::all() {
         let expected_error = match state.unowned() {
             Some(SandboxState::Paused) => None,
             // The generic guards: a stopping or cleanup row is never revived,
@@ -426,6 +426,10 @@ fn template_base_snapshot_admission_writes_only_over_a_paused_row() {
         let conn = crate::db::test_conn();
         let id = SandboxId::new().to_string();
         crate::service::tests::service_tests::insert_test_sandbox_with_runtime(&conn, &id, state);
+        assert_eq!(
+            crate::db::get_sandbox(&conn, &id).unwrap().unwrap().state,
+            state
+        );
         let before = crate::db::test_fixtures::database_rows(&conn);
 
         let result = begin_template_base_snapshot_state(&conn, &id);
